@@ -86,6 +86,17 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Expose Range-related headers so the browser's fetch() + blob() can
+    # handle 206 Partial Content responses (which FileResponse returns
+    # whenever Chrome auto-sends `Range: bytes=0-` on a download).
+    # Without these, Chrome silently drops the response body and reports
+    # `net::ERR_FAILED 206` even though the server sent a valid response.
+    expose_headers=[
+        "Content-Disposition",
+        "Content-Length",
+        "Content-Range",
+        "Accept-Ranges",
+    ],
 )
 
 app.include_router(api_router)
