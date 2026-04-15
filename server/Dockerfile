@@ -26,6 +26,10 @@ COPY . .
 
 # Railway / Render / Fly / Heroku inject PORT at runtime; default to 8000 for local.
 ENV PORT=8000
+# Stream stdout/stderr line-by-line so `docker logs` shows print() output
+# immediately. Without this, Python buffers stdout until shutdown, making
+# live log tailing useless for debugging.
+ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
 # Run Alembic migrations then start the server.
