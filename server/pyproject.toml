@@ -12,7 +12,11 @@ dependencies = [
     "pydantic[email]>=2.10.0",
     "pydantic-settings>=2.7.0",
     "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
+    "passlib>=1.7.4",
+    # passlib 1.7.4's bcrypt backend breaks on bcrypt>=4.1 (it reads a
+    # removed `__about__` attribute). Pin to the last compatible line
+    # until we migrate off passlib.
+    "bcrypt>=4.0,<4.1",
     "redis>=5.2.0",
     "arq>=0.26.1",
     "aiofiles>=24.1.0",
