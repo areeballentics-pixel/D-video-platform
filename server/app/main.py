@@ -17,13 +17,21 @@ from app.core.redis import close_redis, init_redis
 
 
 def _start_worker_thread():
-    """Run arq worker in a separate thread with its own event loop."""
+    """Run arq worker in a separate thread with its own event loop.
+
+    `handle_signals=False` is required on Linux: arq's default behaviour
+    calls `loop.add_signal_handler()`, which fails in non-main threads
+    with `set_wakeup_fd only works in main thread of the main interpreter`.
+    Since the worker runs inside the FastAPI process and lifespan already
+    handles shutdown via the daemon thread, arq doesn't need its own
+    signal handlers.
+    """
     import asyncio
     # Create a new event loop for this thread (required on Windows)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     from app.worker.settings import WorkerSettings
-    run_worker(WorkerSettings)
+    run_worker(WorkerSettings, handle_signals=False)
 
 
 @asynccontextmanager
