@@ -1,0 +1,65 @@
+# ─── Rust ───
+player/src-tauri/target/
+**/*.rs.bk
+
+# ─── Node.js ───
+node_modules/
+dist/
+.vite/
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# ─── Environment & Secrets ───
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ─── IDE ───
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Build artifacts ───
+*.exe
+!player/src-tauri/target/release/*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+
+# ─── Video files (don't commit test videos or encrypted files) ───
+test-videos/*
+!test-videos/.gitkeep
+*.svf
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wmv
+
+# ─── Docker ───
+docker-data/
+
+# ─── Logs ───
+*.log
+
+# ─── Alembic ───
+server/alembic/versions/__pycache__/

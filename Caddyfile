@@ -1,0 +1,47 @@
+# Caddy auto-HTTPS config.
+#
+# Caddy automatically provisions and renews a Let's Encrypt certificate
+# for the domain below on first boot — no certbot, no cron jobs.
+# Requirements for the cert to issue:
+#   - Port 80 and 443 open on the VPS firewall
+#   - DNS A record for {$DOMAIN} pointing to the VPS public IP
+#
+# The DOMAIN env var is injected by docker-compose from the .env file.
+
+{$DOMAIN} {
+	reverse_proxy server:8000 {
+		# Preserve the original Host header so FastAPI sees the real domain
+		header_up Host {upstream_hostport}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Allow large video uploads (server enforces 2.5 GB limit internally)
+	request_body {
+		max_size 3GB
+	}
+
+	# Security headers
+	header {
+		# 1-year HSTS (tells browsers to always use HTTPS for this domain)
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# Prevent MIME sniffing
+		X-Content-Type-Options "nosniff"
+		# Deny embedding in iframes
+		X-Frame-Options "DENY"
+		# Don't send referer to other origins
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Hide the Caddy version
+		-Server
+	}
+
+	# Compress text responses
+	encode zstd gzip
+
+	# Log access to stdout (viewable via `docker compose logs caddy`)
+	log {
+		output stdout
+		format console
+	}
+}

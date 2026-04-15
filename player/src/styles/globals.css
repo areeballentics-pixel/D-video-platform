@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+/* ─── SecurePlayer Dark Theme ─── */
+
+:root {
+  --color-bg: #0f0f0f;
+  --color-surface: #1a1a2e;
+  --color-surface-hover: #252540;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #6366f1;
+  --color-accent: #06b6d4;
+  --color-text: #e2e8f0;
+  --color-text-muted: #94a3b8;
+  --color-error: #ef4444;
+  --color-success: #22c55e;
+  --color-border: #2e2e4a;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Prevent text selection globally (anti-piracy UX) */
+* {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Allow text selection in input fields */
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}

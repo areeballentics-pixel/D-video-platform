@@ -1,0 +1,25 @@
+[project]
+name = "svp-encrypt-tools"
+version = "0.1.0"
+description = "CLI encryption tool for Secure Video Player"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1.0",
+    "cryptography>=44.0.0",
+    "tqdm>=4.67.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[project.scripts]
+svp-encrypt = "encrypt.cli:cli"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["encrypt*"]

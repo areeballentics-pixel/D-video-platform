@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/*
+ * Master dashboard uses ORANGE as primary to visually distinguish from
+ * the tenant admin dashboard (which uses indigo). Same shared design
+ * language — just a different accent so you never confuse the contexts.
+ */
+
+@theme inline {
+  --color-bg-primary: #0f0f0f;
+  --color-bg-surface: #1a1a2e;
+  --color-bg-surface-hover: #22223a;
+  --color-primary: #f97316;         /* orange-500 */
+  --color-primary-hover: #ea580c;   /* orange-600 */
+  --color-accent: #06b6d4;
+  --color-text-primary: #e2e8f0;
+  --color-text-muted: #94a3b8;
+  --color-border: #2e2e4a;
+  --color-error: #ef4444;
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --font-sans: var(--font-inter);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}

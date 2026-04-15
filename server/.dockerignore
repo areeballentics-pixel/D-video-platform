@@ -1,0 +1,38 @@
+# Excluded from the Docker build context — keeps images small and builds fast.
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env files — NEVER ship these into the image
+.env
+.env.*
+!.env.example
+
+# Local dev data
+test-videos/
+uploads/
+
+# Git
+.git/
+.gitignore
+
+# Misc
+*.log
+*.swp

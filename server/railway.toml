@@ -1,0 +1,21 @@
+# Railway deployment configuration.
+#
+# Railway auto-detects this file and uses the Dockerfile in the same directory.
+# Add PostgreSQL + Redis as plugins in the Railway UI — they will auto-inject
+# DATABASE_URL and REDIS_URL into this service's environment.
+#
+# Other env vars to set manually in Railway (see .env.example for the full list):
+#   JWT_SECRET_KEY            (generate: openssl rand -hex 32)
+#   SERVER_ENCRYPTION_KEY     (generate: Fernet.generate_key())
+#   ADMIN_API_KEY             (any random string)
+#   ALLOWED_ORIGINS           (your dashboard URL, e.g. https://admin.example.com)
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

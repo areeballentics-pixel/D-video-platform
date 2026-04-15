@@ -1,0 +1,104 @@
+# Production deployment for Hostinger VPS (or any Docker-capable host).
+#
+# Runs:
+#   - Postgres 16            (internal only, no host port exposed)
+#   - Redis 7                (internal only, no host port exposed)
+#   - FastAPI server + worker (internal only; Caddy proxies to it)
+#   - Caddy                  (exposes 80/443, auto-HTTPS via Let's Encrypt)
+#
+# The dashboard is NOT included here — deploy that to Vercel separately.
+#
+# Usage on the VPS:
+#   cp .env.prod.example .env
+#   # edit .env with real secrets + your domain
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# First-time bootstrap (create initial tenant + admin):
+#   docker compose -f docker-compose.prod.yml exec server \
+#     python scripts/bootstrap_tenant.py \
+#       --tenant-name "Your Academy" \
+#       --tenant-slug your-academy \
+#       --admin-email admin@you.com \
+#       --admin-password 'StrongPass!'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # NOTE: intentionally no `ports:` — Postgres only reachable via
+    # the internal Docker network.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # Same: no `ports:` — internal only.
+
+  server:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      REDIS_URL: "redis://redis:6379/0"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 120
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      SERVER_ENCRYPTION_KEY: ${SERVER_ENCRYPTION_KEY}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      DEFAULT_MAX_DEVICES: ${DEFAULT_MAX_DEVICES:-2}
+      DEFAULT_MAX_DEVICE_CHANGES_PER_30D: ${DEFAULT_MAX_DEVICE_CHANGES_PER_30D:-2}
+      DEFAULT_OFFLINE_GRACE_DAYS: ${DEFAULT_OFFLINE_GRACE_DAYS:-20}
+      PORT: "8000"
+    # Persist uploaded/encrypted .svf files across container restarts
+    volumes:
+      - video_data:/app/test-videos
+    # No `ports:` either — Caddy reverse-proxies to server:8000 over
+    # the Docker network.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+
+volumes:
+  postgres_data:
+  redis_data:
+  video_data:
+  caddy_data:
+  caddy_config:
