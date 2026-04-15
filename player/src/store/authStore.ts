@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { checkAuth, login, loginWithKey, logout, type AuthStatus } from "../lib/tauri";
+import { checkAuth, login, loginWithKey, logout } from "../lib/tauri";
 
 interface AuthState {
   authenticated: boolean;
