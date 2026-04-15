@@ -90,8 +90,12 @@ services:
       # dependencies before the source is copied, so the `app` package
       # isn't registered in site-packages; explicitly add to PYTHONPATH).
       PYTHONPATH: /app
+    # Persist the encrypted .svf files AND the temporarily-staged raw
+    # uploads across container restarts. Without this, `docker compose up`
+    # silently wipes every video the moment a new container is recreated.
     volumes:
-      - video_data:/app/test-videos
+      - video_data:/app/encrypted
+      - upload_data:/app/uploads
     networks:
       - internal        # talks to postgres + redis
       - traefik_public  # reachable by the external Traefik
@@ -115,6 +119,7 @@ volumes:
   postgres_data:
   redis_data:
   video_data:
+  upload_data:
 
 networks:
   # Private network for postgres/redis/server chat — no external access.
