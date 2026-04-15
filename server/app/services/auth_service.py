@@ -20,18 +20,22 @@ from app.models.user import User
 async def authenticate_user(
     session: AsyncSession, email: str, password: str
 ) -> User | None:
-    """Verify email + password credentials. Returns the User or None."""
+    """Verify email + password credentials. Returns the User or None.
+
+    Because the User table's unique constraint is on (tenant_id, email) —
+    not email alone — the same email can legitimately exist in multiple
+    tenants (e.g. a teacher who's an admin at two institutes). We iterate
+    over all matching users and return the first one whose password
+    verifies, so each person logs into the right tenant.
+    """
     result = await session.execute(
         select(User).where(User.email == email, User.is_active == True)  # noqa: E712
     )
-    user = result.scalar_one_or_none()
-    if user is None:
-        return None
-    if not user.password_hash:
-        return None
-    if not verify_password(password, user.password_hash):
-        return None
-    return user
+    candidates = result.scalars().all()
+    for user in candidates:
+        if user.password_hash and verify_password(password, user.password_hash):
+            return user
+    return None
 
 
 async def authenticate_by_key(
