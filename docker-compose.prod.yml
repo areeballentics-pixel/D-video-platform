@@ -1,25 +1,35 @@
-# Production deployment for Hostinger VPS (or any Docker-capable host).
+# Production deployment — coexists with an existing Traefik reverse proxy.
+#
+# This compose expects Traefik to already be running on the host (e.g. as
+# part of an n8n or other stack) and to be attached to an external Docker
+# network named `n8n_default` (the default when n8n is deployed via compose
+# in a directory called `n8n`).
+#
+# Traefik config assumed (matches n8n-traefik-1 by default):
+#   - entrypoint "websecure" on :443 with HTTPS
+#   - entrypoint "web" on :80 redirecting to websecure
+#   - cert resolver named "mytlschallenge" using ACME TLS-ALPN-01
+#   - --providers.docker.exposedbydefault=false (opt-in via traefik.enable)
+#
+# If your Traefik uses different entrypoint/resolver names, edit the
+# `traefik.*` labels on the `server` service below.
 #
 # Runs:
-#   - Postgres 16            (internal only, no host port exposed)
-#   - Redis 7                (internal only, no host port exposed)
-#   - FastAPI server + worker (internal only; Caddy proxies to it)
-#   - Caddy                  (exposes 80/443, auto-HTTPS via Let's Encrypt)
+#   - Postgres 16             (internal only, no host port exposed)
+#   - Redis 7                 (internal only, no host port exposed)
+#   - FastAPI server + worker (reachable to Traefik via n8n_default;
+#                              talks to postgres/redis via internal net)
 #
-# The dashboard is NOT included here — deploy that to Vercel separately.
+# The dashboards go to Vercel. Only the API lives here.
 #
 # Usage on the VPS:
-#   cp .env.prod.example .env
-#   # edit .env with real secrets + your domain
+#   cp .env.prod.example .env    # or create .env manually with secrets
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
-# First-time bootstrap (create initial tenant + admin):
+# First-time master-admin bootstrap:
 #   docker compose -f docker-compose.prod.yml exec server \
-#     python scripts/bootstrap_tenant.py \
-#       --tenant-name "Your Academy" \
-#       --tenant-slug your-academy \
-#       --admin-email admin@you.com \
-#       --admin-password 'StrongPass!'
+#     python scripts/bootstrap_platform_admin.py \
+#       --email you@yourplatform.com --password 'StrongPass!'
 
 services:
   postgres:
@@ -36,8 +46,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # NOTE: intentionally no `ports:` — Postgres only reachable via
-    # the internal Docker network.
+    # Intentionally no `ports:` — Postgres only reachable via internal net.
+    networks:
+      - internal
 
   redis:
     image: redis:7-alpine
@@ -50,7 +61,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Same: no `ports:` — internal only.
+    networks:
+      - internal
 
   server:
     build: ./server
@@ -74,31 +86,42 @@ services:
       DEFAULT_MAX_DEVICE_CHANGES_PER_30D: ${DEFAULT_MAX_DEVICE_CHANGES_PER_30D:-2}
       DEFAULT_OFFLINE_GRACE_DAYS: ${DEFAULT_OFFLINE_GRACE_DAYS:-20}
       PORT: "8000"
-    # Persist uploaded/encrypted .svf files across container restarts
+      # Make /app importable for alembic (the Dockerfile pip-installs
+      # dependencies before the source is copied, so the `app` package
+      # isn't registered in site-packages; explicitly add to PYTHONPATH).
+      PYTHONPATH: /app
     volumes:
       - video_data:/app/test-videos
-    # No `ports:` either — Caddy reverse-proxies to server:8000 over
-    # the Docker network.
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"   # HTTP/3
-    environment:
-      DOMAIN: ${DOMAIN}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - server
+    networks:
+      - internal        # talks to postgres + redis
+      - traefik_public  # reachable by the external Traefik
+    labels:
+      # Opt in to Traefik routing (since Traefik is configured with
+      # --providers.docker.exposedbydefault=false)
+      - "traefik.enable=true"
+      # When a container has multiple networks, tell Traefik which one
+      # to use when connecting to the backend.
+      - "traefik.docker.network=n8n_default"
+      # Router: match Host(api.allentics.com) on the HTTPS entrypoint,
+      # with TLS terminated by the ACME resolver.
+      - "traefik.http.routers.svp-api.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.svp-api.entrypoints=websecure"
+      - "traefik.http.routers.svp-api.tls=true"
+      - "traefik.http.routers.svp-api.tls.certresolver=mytlschallenge"
+      # Service: forward to the container's internal port 8000.
+      - "traefik.http.services.svp-api.loadbalancer.server.port=8000"
 
 volumes:
   postgres_data:
   redis_data:
   video_data:
-  caddy_data:
-  caddy_config:
+
+networks:
+  # Private network for postgres/redis/server chat — no external access.
+  internal:
+  # External Traefik network (already created by the n8n stack).
+  # The literal name `n8n_default` matches what docker compose assigns
+  # when run from /docker/n8n (project name = "n8n").
+  traefik_public:
+    external: true
+    name: n8n_default
