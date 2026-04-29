@@ -1,24 +1,35 @@
-"""Key service — license validation and video decryption key derivation."""
+"""Key service — enrollment-based access control + per-video key derivation.
+
+In v1, "having a license" means "being enrolled in at least one published
+course that contains the video, OR the video is marked as a free preview".
+The legacy `licenses` table has been dropped; access checks go through
+Enrollment + CourseVideo joins.
+"""
 
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decrypt_master_key
+from app.models.course import Course, CourseVideo
 from app.models.device import Device
-from app.models.license import License
+from app.models.enrollment import Enrollment
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.video import Video
 from app.utils.crypto import derive_video_key
 
-QUALITY_MAP = {"480p": 0, "720p": 1, "1080p": 2}
+# Quality int matches the SVF header's `quality` field (u16, little-endian).
+# 65535 ("original") is the encryptor's fallback when MP4 dims don't match a
+# standard bucket — keep this in sync with crates/svf-core/src/svf.rs and
+# encryptor/src-tauri/src/pipeline.rs.
+QUALITY_MAP = {"480p": 0, "720p": 1, "1080p": 2, "original": 65535}
 
 
 class LicenseInvalid(Exception):
-    """Raised when the user does not have a valid license for the requested video."""
+    """Raised when the user does not have a valid enrollment for the requested video."""
     pass
 
 
@@ -32,50 +43,86 @@ class VideoNotFound(Exception):
     pass
 
 
+async def _user_has_enrollment_access(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    video_id: uuid.UUID,
+) -> bool:
+    """True if the user is enrolled (active, non-expired) in any published,
+    non-archived course that contains this video."""
+    now = datetime.now(timezone.utc)
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Enrollment)
+        .join(CourseVideo, CourseVideo.course_id == Enrollment.course_id)
+        .join(Course, Course.id == Enrollment.course_id)
+        .where(
+            Enrollment.user_id == user_id,
+            Enrollment.is_active.is_(True),
+            or_(Enrollment.expires_at.is_(None), Enrollment.expires_at > now),
+            CourseVideo.video_id == video_id,
+            Course.is_published.is_(True),
+            Course.is_archived.is_(False),
+        )
+    )
+    return bool(count and count > 0)
+
+
 async def validate_license(
     session: AsyncSession,
     user: User,
     video_id: uuid.UUID,
     device_fingerprint: str,
 ) -> bool:
-    """
-    Check that:
-    1. The user has an active device matching the fingerprint.
-    2. The user holds a valid (active, non-expired) license for the video
-       (or a wildcard license with video_id=NULL).
+    """Verify device + video access. Returns True or raises.
 
-    Returns True if valid, raises otherwise.
+    Access is granted if any of:
+      - The video is marked is_free_preview=True
+      - The user is enrolled in a published, non-archived course containing it
     """
-    # Verify device
-    device_result = await session.execute(
+    # ── Device check ──
+    device = (await session.execute(
         select(Device).where(
             Device.user_id == user.id,
             Device.fingerprint == device_fingerprint,
-            Device.is_active == True,  # noqa: E712
+            Device.is_active.is_(True),
         )
-    )
-    device = device_result.scalar_one_or_none()
+    )).scalar_one_or_none()
     if device is None:
         raise DeviceMismatch("Device not registered or inactive for this user")
 
-    # Update last_seen
     device.last_seen_at = datetime.now(timezone.utc)
 
-    # Check license — either specific to this video or a wildcard (video_id IS NULL)
-    now = datetime.now(timezone.utc)
-    license_result = await session.execute(
-        select(License).where(
-            License.user_id == user.id,
-            License.is_active == True,  # noqa: E712
-            (License.video_id == video_id) | (License.video_id.is_(None)),
-            (License.expires_at.is_(None)) | (License.expires_at > now),
-        )
-    )
-    license_row = license_result.scalar_one_or_none()
-    if license_row is None:
-        raise LicenseInvalid("No valid license for this video")
+    # ── Video lookup ──
+    video = await session.get(Video, video_id)
+    if video is None:
+        raise VideoNotFound("Video not found")
+    if video.tenant_id != user.tenant_id:
+        raise LicenseInvalid("Video does not belong to your tenant")
 
-    return True
+    # ── Access check ──
+    if video.is_free_preview:
+        return True
+
+    if await _user_has_enrollment_access(session, user.id, video_id):
+        return True
+
+    raise LicenseInvalid("No active enrollment grants access to this video")
+
+
+def _get_quality_salt(video: Video, quality_str: str) -> bytes | None:
+    """Pull the per-quality salt out of `video.encryption_params`. Returns None
+    if the quality hasn't been encrypted/registered yet."""
+    params = (video.encryption_params or {}).get(quality_str)
+    if not params:
+        return None
+    salt_hex = params.get("salt")
+    if not salt_hex:
+        return None
+    try:
+        return bytes.fromhex(salt_hex)
+    except ValueError:
+        return None
 
 
 async def get_video_key(
@@ -85,10 +132,7 @@ async def get_video_key(
     quality: str,
     device_fingerprint: str,
 ) -> str:
-    """
-    Validate the license, load tenant master key, load video encryption params,
-    derive the per-video key via HKDF, and return it as a hex string.
-    """
+    """Validate access, derive the per-(video, quality) key, return as hex."""
     try:
         video_id = uuid.UUID(video_id_str)
     except ValueError:
@@ -98,36 +142,29 @@ async def get_video_key(
     if quality_int is None:
         raise ValueError(f"Unsupported quality: {quality}. Use 480p, 720p, or 1080p.")
 
-    # Validate license + device
     await validate_license(session, user, video_id, device_fingerprint)
 
-    # Load the video
-    video_result = await session.execute(
+    video = (await session.execute(
         select(Video).where(Video.id == video_id)
-    )
-    video = video_result.scalar_one_or_none()
+    )).scalar_one_or_none()
     if video is None:
         raise VideoNotFound("Video not found")
 
-    # Ensure the video belongs to the user's tenant
-    if video.tenant_id != user.tenant_id:
-        raise LicenseInvalid("Video does not belong to your tenant")
+    salt = _get_quality_salt(video, quality)
+    if salt is None:
+        raise VideoNotFound(f"Quality {quality} has not been encrypted for this video")
 
-    # Load the tenant to get the master key
-    tenant_result = await session.execute(
+    tenant = (await session.execute(
         select(Tenant).where(Tenant.id == user.tenant_id)
-    )
-    tenant = tenant_result.scalar_one_or_none()
+    )).scalar_one_or_none()
     if tenant is None:
         raise LicenseInvalid("Tenant not found")
 
-    # Decrypt the master key
     master_key = decrypt_master_key(tenant.master_key)
 
-    # Derive the per-video key
     derived_key = derive_video_key(
         master_key=master_key,
-        salt=video.encryption_salt,
+        salt=salt,
         video_id=video.id.bytes,
         tenant_id=tenant.id.bytes,
         quality=quality_int,
@@ -140,79 +177,79 @@ async def get_user_licensed_keys(
     session: AsyncSession,
     user: User,
 ) -> list[dict]:
+    """Bundle of (video_id, quality, key) entries for every video the user
+    can play right now: enrolled-course videos + free-preview videos.
+
+    Sent to the player on login so it can play any of those videos fully
+    offline without ever holding the tenant master key.
     """
-    Return a bundle of decryption keys for every video this user is licensed to.
-
-    This is sent to the player on login so it can play any of the user's
-    licensed videos fully offline — without ever holding the tenant master key.
-
-    Each entry: ``{"video_id": <hex>, "quality": "480p"|"720p"|"1080p", "key": <hex>}``
-
-    Notes:
-    - Wildcard licenses (video_id IS NULL) include all of the tenant's videos.
-    - Expired or inactive licenses are filtered out.
-    - One entry per (video, quality) pair; the player picks the right one
-      based on which `.svf` file the student opens.
-    """
-    # Active, non-expired licenses for this user
     now = datetime.now(timezone.utc)
-    license_result = await session.execute(
-        select(License).where(
-            License.user_id == user.id,
-            License.is_active == True,  # noqa: E712
-            or_(License.expires_at.is_(None), License.expires_at > now),
+
+    # Videos reachable via active enrollments to published courses.
+    enrolled_videos_q = (
+        select(Video)
+        .join(CourseVideo, CourseVideo.video_id == Video.id)
+        .join(Course, Course.id == CourseVideo.course_id)
+        .join(Enrollment, Enrollment.course_id == Course.id)
+        .where(
+            Enrollment.user_id == user.id,
+            Enrollment.is_active.is_(True),
+            or_(Enrollment.expires_at.is_(None), Enrollment.expires_at > now),
+            Course.is_published.is_(True),
+            Course.is_archived.is_(False),
+            Video.tenant_id == user.tenant_id,
+        )
+        .distinct()
+    )
+
+    # Free-preview videos in the user's tenant.
+    free_videos_q = (
+        select(Video).where(
+            Video.tenant_id == user.tenant_id,
+            Video.is_free_preview.is_(True),
         )
     )
-    licenses = license_result.scalars().all()
 
-    if not licenses:
-        return []
+    enrolled_videos = (await session.execute(enrolled_videos_q)).scalars().all()
+    free_videos = (await session.execute(free_videos_q)).scalars().all()
 
-    # Determine which videos to include
-    has_wildcard = any(lic.video_id is None for lic in licenses)
-    if has_wildcard:
-        # User can access every video in the tenant
-        videos_result = await session.execute(
-            select(Video).where(Video.tenant_id == user.tenant_id)
-        )
-    else:
-        # User has only specific licenses
-        video_ids = [lic.video_id for lic in licenses if lic.video_id is not None]
-        videos_result = await session.execute(
-            select(Video).where(Video.id.in_(video_ids))
-        )
-    videos = videos_result.scalars().all()
+    # De-dup by video_id (a free-preview video may also be in an enrolled course).
+    by_id = {v.id: v for v in enrolled_videos}
+    for v in free_videos:
+        by_id.setdefault(v.id, v)
+    videos = list(by_id.values())
 
     if not videos:
         return []
 
-    # Decrypt the tenant master key once and derive every per-video key.
-    # The master key never leaves this function — only the derived per-video
-    # keys are sent to the client.
-    tenant_result = await session.execute(
+    tenant = (await session.execute(
         select(Tenant).where(Tenant.id == user.tenant_id)
-    )
-    tenant = tenant_result.scalar_one()
+    )).scalar_one()
     master_key = decrypt_master_key(tenant.master_key)
 
     bundle: list[dict] = []
     for video in videos:
-        # `qualities` is a JSONB list like ["480p", "720p", "1080p"]
         for quality_str in (video.qualities or []):
             quality_int = QUALITY_MAP.get(quality_str)
             if quality_int is None:
                 continue
 
+            salt = _get_quality_salt(video, quality_str)
+            if salt is None:
+                # Quality not yet encrypted/registered; skip — student will
+                # see a clear error if they try to play it.
+                continue
+
             derived = derive_video_key(
                 master_key=master_key,
-                salt=video.encryption_salt,
+                salt=salt,
                 video_id=video.id.bytes,
                 tenant_id=tenant.id.bytes,
                 quality=quality_int,
             )
 
             bundle.append({
-                "video_id": video.id.hex,  # 32 hex chars, no dashes
+                "video_id": video.id.hex,
                 "quality": quality_str,
                 "key": derived.hex(),
             })

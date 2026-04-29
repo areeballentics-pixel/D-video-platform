@@ -15,12 +15,14 @@
 # `traefik.*` labels on the `server` service below.
 #
 # Runs:
-#   - Postgres 16             (internal only, no host port exposed)
-#   - Redis 7                 (internal only, no host port exposed)
-#   - FastAPI server + worker (reachable to Traefik via n8n_default;
-#                              talks to postgres/redis via internal net)
+#   - Postgres 16   (internal only, no host port exposed)
+#   - Redis 7       (internal only, no host port exposed)
+#   - FastAPI       (reachable to Traefik via n8n_default; talks to postgres
+#                    + redis via internal net). No background worker — v1.5
+#                    institutes encrypt locally on the desktop.
 #
-# The dashboards go to Vercel. Only the API lives here.
+# Master dashboard goes to Vercel. The encryptor + player are Tauri desktop
+# apps shipped to institutes/students directly.
 #
 # Usage on the VPS:
 #   cp .env.prod.example .env    # or create .env manually with secrets
@@ -30,6 +32,10 @@
 #   docker compose -f docker-compose.prod.yml exec server \
 #     python scripts/bootstrap_platform_admin.py \
 #       --email you@yourplatform.com --password 'StrongPass!'
+#
+# Subsequent updates (after a `git pull`):
+#   docker compose -f docker-compose.prod.yml up -d --build server
+# Alembic migrations run automatically on container start (see Dockerfile CMD).
 
 services:
   postgres:
@@ -90,12 +96,9 @@ services:
       # dependencies before the source is copied, so the `app` package
       # isn't registered in site-packages; explicitly add to PYTHONPATH).
       PYTHONPATH: /app
-    # Persist the encrypted .svf files AND the temporarily-staged raw
-    # uploads across container restarts. Without this, `docker compose up`
-    # silently wipes every video the moment a new container is recreated.
-    volumes:
-      - video_data:/app/encrypted
-      - upload_data:/app/uploads
+    # No bind-mounted video volumes in v1 — institutes host their own .svf
+    # files (Google Drive etc.) and the server stores only metadata. The
+    # legacy `video_data` and `upload_data` volumes have been removed.
     networks:
       - internal        # talks to postgres + redis
       - traefik_public  # reachable by the external Traefik
@@ -118,8 +121,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  video_data:
-  upload_data:
 
 networks:
   # Private network for postgres/redis/server chat — no external access.

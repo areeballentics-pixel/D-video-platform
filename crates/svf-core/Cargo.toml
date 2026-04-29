@@ -1,0 +1,42 @@
+[package]
+name = "svf-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared SVF format I/O, AES-CTR crypto, and device fingerprinting for the Secure Video Platform"
+
+[dependencies]
+# ─── Cryptography ───
+aes = "0.8"
+ctr = "0.9"
+cipher = "0.4"
+sha2 = "0.10"
+hkdf = "0.12"
+zeroize = { version = "1", features = ["derive"] }
+
+# ─── Format I/O ───
+byteorder = "1"
+hex = "0.4"
+
+# ─── Serialization (for DeviceInfo + SvfInfo + SvfHeader) ───
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ─── Errors ───
+thiserror = "2"
+
+# ─── Logging (used by device fingerprint cache) ───
+log = "0.4"
+
+# ─── Device fingerprint cache path ───
+directories = "6"
+
+# ─── Hostname for device info ───
+hostname = "0.4"
+
+# ─── Windows-specific: WMI for hardware fingerprinting + VirtualLock for keys ───
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_System_Memory",
+  "Win32_Foundation",
+] }
+wmi = "0.18"

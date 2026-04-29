@@ -2,12 +2,16 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, TotpRequiredError } from "@/lib/api";
 
 export default function MasterLoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  // True after first attempt returns "TOTP required" — re-renders the form
+  // with a 6-digit code field.
+  const [needsTotp, setNeedsTotp] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -17,10 +21,15 @@ export default function MasterLoginPage() {
     setLoading(true);
 
     try {
-      await api.login(email, password);
+      await api.login(email, password, needsTotp ? totpCode : undefined);
       router.push("/master");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      if (err instanceof TotpRequiredError) {
+        setNeedsTotp(true);
+        setError("");
+      } else {
+        setError(err instanceof Error ? err.message : "Login failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -32,7 +41,6 @@ export default function MasterLoginPage() {
         {/* Logo / brand */}
         <div className="mb-8 text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary">
-            {/* Shield icon — signifies platform-level administration */}
             <svg
               className="h-7 w-7 text-white"
               fill="none"
@@ -59,7 +67,6 @@ export default function MasterLoginPage() {
           </div>
         </div>
 
-        {/* Login card */}
         <div className="rounded-xl border border-border bg-bg-surface p-8">
           <form onSubmit={handleSubmit} className="space-y-5">
             {error && (
@@ -81,7 +88,8 @@ export default function MasterLoginPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2.5 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary"
+                disabled={needsTotp}
+                className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2.5 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary disabled:opacity-60"
                 placeholder="you@yourplatform.com"
               />
             </div>
@@ -99,43 +107,63 @@ export default function MasterLoginPage() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2.5 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary"
+                disabled={needsTotp}
+                className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2.5 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary disabled:opacity-60"
                 placeholder="Enter your password"
               />
             </div>
 
+            {needsTotp && (
+              <div>
+                <label
+                  htmlFor="totp"
+                  className="mb-1.5 block text-sm font-medium text-text-muted"
+                >
+                  6-digit code from your authenticator
+                </label>
+                <input
+                  id="totp"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  required
+                  autoFocus
+                  value={totpCode}
+                  onChange={(e) =>
+                    setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="123456"
+                  className="w-full rounded-lg border border-primary/30 bg-bg-primary px-4 py-2.5 text-center font-mono text-lg tracking-widest text-text-primary outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary"
+                />
+                <p className="mt-1.5 text-xs text-text-muted/70">
+                  This account has 2FA enabled. Enter the current code from
+                  your authenticator app.
+                </p>
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || (needsTotp && totpCode.length !== 6)}
               className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? (
-                <span className="flex items-center justify-center gap-2">
-                  <svg
-                    className="h-4 w-4 animate-spin"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                    />
-                  </svg>
-                  Signing in...
-                </span>
-              ) : (
-                "Sign in"
-              )}
+              {loading ? "Signing in…" : needsTotp ? "Verify code" : "Sign in"}
             </button>
+
+            {needsTotp && (
+              <button
+                type="button"
+                onClick={() => {
+                  setNeedsTotp(false);
+                  setTotpCode("");
+                  setError("");
+                }}
+                className="w-full rounded-lg border border-border px-4 py-2 text-xs font-medium text-text-muted hover:bg-bg-surface-hover"
+              >
+                Back to password
+              </button>
+            )}
           </form>
         </div>
 

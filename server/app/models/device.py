@@ -15,7 +15,9 @@ class Device(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
 
-    fingerprint: Mapped[str] = mapped_column(String(64))  # SHA-256 hex
+    # Allow up to 128 chars so prefixed formats like
+    # "encryptor-app-<64-hex>" or "dashboard-<uuid>" fit comfortably.
+    fingerprint: Mapped[str] = mapped_column(String(128))
     hostname: Mapped[str] = mapped_column(String(255), default="")
     os_version: Mapped[str] = mapped_column(String(100), default="")
 

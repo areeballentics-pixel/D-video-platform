@@ -34,6 +34,15 @@ async def authenticate_user(
     candidates = result.scalars().all()
     for user in candidates:
         if user.password_hash and verify_password(password, user.password_hash):
+            # v1.5: track last_login_at — used by master dashboard's "last
+            # admin login" column to spot dormant tenants. Best-effort: a
+            # commit failure here doesn't block the login itself.
+            from datetime import datetime, timezone
+            user.last_login_at = datetime.now(timezone.utc)
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
             return user
     return None
 

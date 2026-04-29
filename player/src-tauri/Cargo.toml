@@ -12,6 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# ─── Shared SVF format + crypto + device fingerprint ───
+svf-core = { path = "../../crates/svf-core" }
+
 # ─── Tauri core ───
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
@@ -68,8 +71,5 @@ windows = { version = "0.61", features = [
 ] }
 wmi = "0.18"
 
-[profile.release]
-strip = true      # Strip debug symbols for smaller binary
-lto = true         # Link-Time Optimization for performance
-codegen-units = 1  # Better optimization at cost of compile time
-panic = "abort"    # Smaller binary, no unwinding
+
+# Release profile is defined at the workspace root (../../Cargo.toml).

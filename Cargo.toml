@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/svf-core",
+    "crates/svf-core-jni",
+    "crates/svf-core-ffi",
+    "player/src-tauri",
+    "encryptor/src-tauri",
+]
+
+# Shared release profile for all members. Tuned for "fast build, fast runtime":
+#   - thin LTO + 16 codegen units instead of fat LTO + 1: dramatically less
+#     RAM during compile (fat LTO + 1 unit OOMs rustc on the windows-sys
+#     crate which has hundreds of features), with ~5% worse runtime perf —
+#     unmeasurable for our AES + I/O workload.
+#   - strip + panic=abort kept for binary size.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 16
+panic = "abort"

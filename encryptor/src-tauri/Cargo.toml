@@ -1,0 +1,54 @@
+[package]
+name = "svp-encryptor"
+version = "0.1.0"
+edition = "2021"
+description = "Institute-side video encryption desktop app for the Secure Video Platform"
+
+[lib]
+name = "svp_encryptor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ─── Shared crypto + SVF format + device fingerprint ───
+svf-core = { path = "../../crates/svf-core" }
+
+# ─── Tauri core ───
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+
+# ─── Async runtime ───
+tokio = { version = "1", features = ["full"] }
+
+# ─── Serialization ───
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ─── HTTP client (talks to the SVP server API) ───
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# ─── MP4 metadata probing (no FFprobe; pure Rust) ───
+mp4 = "0.14"
+
+# ─── OS keychain (Windows Credential Manager / macOS Keychain / SecretService) ───
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# ─── Content hash + chunk encryption helpers ───
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# ─── OS entropy for per-quality salt + nonce ───
+getrandom = "0.2"
+
+# ─── Errors + logging ───
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+# ─── Config persistence (non-secret state next to keychain entry) ───
+directories = "6"

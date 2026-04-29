@@ -1,0 +1,45 @@
+# Node
+node_modules/
+.npm
+.eslintcache
+
+# React Native
+.bundle/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# iOS
+ios/Pods/
+ios/build/
+ios/*.xcworkspace/
+ios/DerivedData/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+*.apk
+*.aab
+
+# Metro
+.metro-health-check*
+
+# Jest + coverage
+coverage/
+
+# Logs
+yarn-debug.log*
+yarn-error.log*
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Native dynamic libraries built by cargo-ndk / cargo-lipo (committed only
+# in CI artifacts, not in the source tree).
+android/app/src/main/jniLibs/
+ios/svf-core/svf-core.xcframework/

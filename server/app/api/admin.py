@@ -1,34 +1,36 @@
-"""Admin endpoints — video upload, encryption pipeline, student management.
+"""Admin endpoints — video flow, student management, tenant scoped operations.
 
 These endpoints are restricted to users with role="admin".
+
+The legacy upload + encryption-job + download endpoints (kept for compatibility
+between Task #2 and Task #12) are scheduled for removal — they reference
+columns that no longer exist on the Video model and will fail at runtime.
+The v1 flow is: encryptor app calls POST /videos/register-encrypted with
+metadata, then PUT /videos/{id}/download-urls once the institute has uploaded
+the .svf to their Drive.
 """
 
-import json
 import uuid
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-import aiofiles
-from arq import ArqRedis, create_pool
-from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from jose import jwt
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.config import settings
-from app.core.security import decrypt_master_key
+from app.core.security import hash_password, verify_password
 from app.database import get_db
 from app.models.device import Device
-from app.models.license import License
 from app.models.tenant import Tenant
 from app.models.user import User
-from app.models.video import Video
-from app.core.security import hash_password
+from app.models.video import VIDEO_STATUS_LIVE, VIDEO_STATUS_PENDING_URLS, Video
+from app.services.audit_service import write_audit
 
 router = APIRouter()
-
-UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
-ENCRYPTED_DIR = Path(__file__).parent.parent.parent / "encrypted"
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
@@ -41,175 +43,12 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-async def get_arq_pool() -> ArqRedis:
-    """Get an arq Redis pool for enqueuing jobs."""
-    return await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
-
-
-# ─── Video Upload & Encryption ───
-
-@router.post("/videos/upload")
-async def upload_video(
-    file: UploadFile = File(...),
-    title: str = Form(...),
-    qualities: str = Form("480p,720p,1080p"),
-    user: User = Depends(require_admin),
-    session: AsyncSession = Depends(get_db),
-):
-    """Upload a raw video file and start the encryption pipeline.
-
-    The video is saved to disk, then an async job is queued to:
-    1. Transcode to requested qualities (FFmpeg)
-    2. Encrypt with AES-256-CTR
-    3. Package into .svf files
-    4. Register in the database
-    """
-    # Validate file type
-    allowed_extensions = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm"}
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {ext}. Allowed: {', '.join(allowed_extensions)}",
-        )
-
-    # Generate IDs
-    video_id = str(uuid.uuid4())
-    job_id = str(uuid.uuid4())
-    safe_filename = f"{job_id}{ext}"
-
-    # Save uploaded file to disk
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    upload_path = UPLOAD_DIR / safe_filename
-
-    async with aiofiles.open(upload_path, "wb") as f:
-        while chunk := await file.read(1_048_576):  # 1 MiB chunks
-            await f.write(chunk)
-
-    file_size = upload_path.stat().st_size
-
-    # Get tenant master key
-    result = await session.execute(
-        select(Tenant).where(Tenant.id == user.tenant_id)
-    )
-    tenant = result.scalar_one_or_none()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    master_key_hex = decrypt_master_key(tenant.master_key).hex()
-
-    # Parse qualities
-    quality_list = [q.strip() for q in qualities.split(",") if q.strip() in ("480p", "720p", "1080p")]
-    if not quality_list:
-        quality_list = ["480p", "720p", "1080p"]
-
-    # Enqueue encryption job
-    pool = await get_arq_pool()
-    await pool.enqueue_job(
-        "encrypt_video_job",
-        job_id=job_id,
-        video_id=video_id,
-        tenant_id=str(user.tenant_id),
-        title=title,
-        input_filename=safe_filename,
-        qualities=quality_list,
-        master_key_hex=master_key_hex,
-    )
-    await pool.close()
-
-    # Store initial status
-    from app.core.redis import get_redis
-    redis = get_redis()
-    await redis.set(f"job:{job_id}:status", json.dumps({
-        "status": "queued",
-        "progress": 0,
-        "detail": "Waiting in queue...",
-    }), ex=86400)
-
-    return {
-        "job_id": job_id,
-        "video_id": video_id,
-        "filename": file.filename,
-        "file_size": file_size,
-        "qualities": quality_list,
-        "message": "Upload complete. Encryption job queued.",
-    }
-
-
-@router.get("/videos/jobs/{job_id}")
-async def get_job_status(
-    job_id: str,
-    user: User = Depends(require_admin),
-):
-    """Get the current status of an encryption job."""
-    from app.core.redis import get_redis
-    redis = get_redis()
-
-    status_data = await redis.get(f"job:{job_id}:status")
-    if not status_data:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job_status = json.loads(status_data)
-
-    # If completed, also return the result
-    if job_status["status"] == "completed":
-        result_data = await redis.get(f"job:{job_id}:result")
-        if result_data:
-            job_status["result"] = json.loads(result_data)
-
-    return {"job_id": job_id, **job_status}
-
-
-@router.post("/videos/jobs/{job_id}/register")
-async def register_completed_video(
-    job_id: str,
-    user: User = Depends(require_admin),
-    session: AsyncSession = Depends(get_db),
-):
-    """Register a completed encryption job's video in the database.
-
-    Call this after the job status is 'completed' to make the video
-    available for licensing and playback.
-    """
-    from app.core.redis import get_redis
-    redis = get_redis()
-
-    result_data = await redis.get(f"job:{job_id}:result")
-    if not result_data:
-        raise HTTPException(status_code=404, detail="Job result not found")
-
-    result = json.loads(result_data)
-
-    # Check if already registered
-    vid = uuid.UUID(result["video_id"])
-    existing = await session.execute(select(Video).where(Video.id == vid))
-    if existing.scalar_one_or_none():
-        return {"message": "Video already registered", "video_id": result["video_id"]}
-
-    # Use the first quality's encryption params for the database record
-    first_quality = list(result["qualities"].values())[0]
-
-    video = Video(
-        id=vid,
-        tenant_id=uuid.UUID(result["tenant_id"]),
-        title=result["title"],
-        description="",
-        qualities=list(result["qualities"].keys()),
-        encryption_salt=bytes.fromhex(first_quality["encryption_salt"]),
-        encryption_nonce=bytes.fromhex(first_quality["encryption_nonce"]),
-        duration_ms=result["duration_ms"],
-    )
-    session.add(video)
-    await session.flush()
-
-    return {
-        "message": "Video registered",
-        "video_id": result["video_id"],
-        "title": result["title"],
-    }
-
-
-# ─── Video Management ───
+# ─── Video Management (server-side encryption removed in v1) ───
+#
+# In v1 the SVP Encryptor desktop app produces .svf files locally and
+# registers them via /admin/videos/register-encrypted. The legacy upload +
+# transcode + jobs + download endpoints have been deleted; their wired
+# replacements live further down in this file.
 
 @router.get("/videos")
 async def list_videos(
@@ -235,27 +74,6 @@ async def list_videos(
             for v in videos
         ]
     }
-
-
-@router.get("/videos/{video_id}/download/{quality}")
-async def download_svf(
-    video_id: str,
-    quality: str,
-    user: User = Depends(require_admin),
-):
-    """Download an encrypted .svf file."""
-    filename = f"{video_id}_{quality}.svf"
-    filepath = ENCRYPTED_DIR / filename
-
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="SVF file not found")
-
-    from fastapi.responses import FileResponse
-    return FileResponse(
-        path=str(filepath),
-        filename=filename,
-        media_type="application/octet-stream",
-    )
 
 
 @router.delete("/videos/{video_id}")
@@ -339,6 +157,26 @@ async def create_student(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already exists for this tenant")
 
+    # ── Quota enforcement: count active students vs tenant.max_students ──
+    # 402 Payment Required is the right semantic — "this is plan-driven,
+    # contact your platform admin to upgrade", not "wait and retry".
+    tenant = (await session.execute(
+        select(Tenant).where(Tenant.id == user.tenant_id)
+    )).scalar_one()
+    current_students = await session.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.tenant_id == user.tenant_id, User.role == "student")
+    ) or 0
+    if current_students >= tenant.max_students:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Student quota reached ({current_students}/{tenant.max_students}). "
+                f"Contact your platform admin to raise the limit."
+            ),
+        )
+
     student = User(
         tenant_id=user.tenant_id,
         email=email,
@@ -347,21 +185,16 @@ async def create_student(
         role="student",
     )
     session.add(student)
-    # Must flush BEFORE creating the License so that SQLAlchemy assigns
-    # student.id from the column default — otherwise the License row gets
-    # user_id=NULL and the insert fails the FK constraint.
     await session.flush()
 
-    # Create wildcard license (video_id NULL = access to all tenant videos)
-    license = License(user_id=student.id, video_id=None)
-    session.add(license)
-    await session.flush()
-
+    # In v1, students start with no access. The admin must explicitly enroll
+    # them in courses via POST /api/admin/enrollments (Task #3). The legacy
+    # wildcard-license auto-creation has been removed.
     return {
         "user_id": str(student.id),
         "email": student.email,
         "license_key": student.license_key,
-        "message": "Student created with full video access",
+        "message": "Student created. Enroll them in one or more courses to grant video access.",
     }
 
 
@@ -414,3 +247,493 @@ async def force_deregister_device(
     await session.flush()
 
     return {"message": "Device force-deregistered", "device_id": device_id}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v1 endpoints: encryptor-side video registration + post-encryption flow
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class QualityEncryptionParams(BaseModel):
+    salt: str = Field(..., min_length=64, max_length=64)   # 32 bytes hex
+    nonce: str = Field(..., min_length=32, max_length=32)  # 16 bytes hex
+
+
+class RegisterEncryptedVideoRequest(BaseModel):
+    video_id: str                              # encryptor controls UUIDs
+    title: str = Field(..., max_length=512)
+    duration_ms: int = 0
+    qualities: list[str]                       # e.g. ["720p"]
+    encryption_params: dict[str, QualityEncryptionParams]
+    content_hashes: dict[str, str]             # per-quality SHA-256 hex
+    file_sizes: dict[str, int]                 # per-quality .svf size in bytes
+
+
+class RegisterEncryptedVideoResponse(BaseModel):
+    video_id: str
+    status: str
+    qualities: list[str]
+    needs_download_urls_for: list[str]
+
+
+@router.post("/videos/register-encrypted", response_model=RegisterEncryptedVideoResponse)
+async def register_encrypted_video(
+    body: RegisterEncryptedVideoRequest,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Encryptor desktop app reports a finished encryption job. Server stores
+    the metadata; the institute then uploads the .svf to their Drive and
+    pastes the URLs via PUT /videos/{id}/download-urls.
+
+    Idempotent: if a Video row with this ID already exists for the tenant,
+    the new qualities are merged into existing JSONB maps rather than replaced.
+    """
+    try:
+        vid = uuid.UUID(body.video_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid video_id (must be UUID)")
+
+    # Validate per-quality coverage.
+    missing = [q for q in body.qualities if q not in body.encryption_params]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"encryption_params missing for qualities: {missing}",
+        )
+
+    existing = (await session.execute(
+        select(Video).where(Video.id == vid)
+    )).scalar_one_or_none()
+
+    # ── Video quota enforcement (only on NEW videos, not re-registrations) ──
+    if existing is None:
+        tenant = (await session.execute(
+            select(Tenant).where(Tenant.id == user.tenant_id)
+        )).scalar_one()
+        current_videos = await session.scalar(
+            select(func.count())
+            .select_from(Video)
+            .where(Video.tenant_id == user.tenant_id)
+        ) or 0
+        if current_videos >= tenant.max_videos:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Video quota reached ({current_videos}/{tenant.max_videos}). "
+                    f"Contact your platform admin to raise the limit."
+                ),
+            )
+
+    if existing is not None:
+        if existing.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=403, detail="video_id collision with another tenant")
+        video = existing
+        # Merge: each quality is independent metadata; overwrite if re-registered.
+        params_map = dict(video.encryption_params or {})
+        hashes_map = dict(video.content_hashes or {})
+        sizes_map = dict(video.file_sizes or {})
+        urls_map = dict(video.download_urls or {})
+        qualities_list = list(video.qualities or [])
+    else:
+        video = Video(
+            id=vid,
+            tenant_id=user.tenant_id,
+            title=body.title,
+            description="",
+            duration_ms=body.duration_ms,
+            status=VIDEO_STATUS_PENDING_URLS,
+        )
+        session.add(video)
+        params_map = {}
+        hashes_map = {}
+        sizes_map = {}
+        urls_map = {}
+        qualities_list = []
+
+    # Merge per-quality entries.
+    for q in body.qualities:
+        ep = body.encryption_params[q]
+        params_map[q] = {"salt": ep.salt, "nonce": ep.nonce}
+        if q in body.content_hashes:
+            hashes_map[q] = body.content_hashes[q]
+        if q in body.file_sizes:
+            sizes_map[q] = int(body.file_sizes[q])
+        if q not in qualities_list:
+            qualities_list.append(q)
+
+    video.qualities = qualities_list
+    video.encryption_params = params_map
+    video.content_hashes = hashes_map
+    video.file_sizes = sizes_map
+
+    # Title can be updated on subsequent registrations (re-encrypt).
+    if body.title:
+        video.title = body.title
+    if body.duration_ms:
+        video.duration_ms = body.duration_ms
+
+    # Status: live immediately on registration. download_urls are now purely
+    # optional metadata — institutes can distribute the .svf via Drive (URL),
+    # pendrive, email, internal share, etc. The player tries the URL if set,
+    # otherwise expects the file to be in the local library folder.
+    # `needs_urls` is still computed below as a hint for the awaiting-upload
+    # screen, but it's no longer a status gate.
+    needs_urls = [q for q in qualities_list if q not in urls_map]
+    video.status = VIDEO_STATUS_LIVE
+
+    await session.commit()
+    await session.refresh(video)
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="video.register_encrypted",
+        target_type="video", target_id=str(video.id),
+        details={"title": video.title, "qualities": body.qualities},
+        request=request,
+    )
+    await session.commit()
+
+    return RegisterEncryptedVideoResponse(
+        video_id=str(video.id),
+        status=video.status,
+        qualities=qualities_list,
+        needs_download_urls_for=needs_urls,
+    )
+
+
+class DownloadUrlsRequest(BaseModel):
+    # Per-quality URL map. Keys must be among the video's existing qualities.
+    download_urls: dict[str, str]
+
+
+@router.put("/videos/{video_id}/download-urls")
+async def put_download_urls(
+    video_id: str,
+    body: DownloadUrlsRequest,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Paste Drive URLs after the institute uploads the .svf files.
+    Flips status → live once every encrypted quality has a URL."""
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid video_id")
+
+    video = (await session.execute(
+        select(Video).where(Video.id == vid, Video.tenant_id == user.tenant_id)
+    )).scalar_one_or_none()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Validate basic URL shape — institutes self-host; we don't fetch them but
+    # we want to catch obvious typos at the dashboard layer.
+    for q, url in body.download_urls.items():
+        if not (url.startswith("https://") or url.startswith("http://")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"download_urls['{q}'] must be an http(s) URL",
+            )
+
+    urls = dict(video.download_urls or {})
+    urls.update(body.download_urls)
+    video.download_urls = urls
+
+    # Status stays `live` regardless — URLs are optional. needs_urls is just
+    # a hint for the encryptor's distribution screen.
+    needs_urls = [q for q in (video.qualities or []) if q not in urls]
+    if video.status != VIDEO_STATUS_LIVE:
+        video.status = VIDEO_STATUS_LIVE
+
+    await session.commit()
+    await session.refresh(video)
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="video.set_download_urls",
+        target_type="video", target_id=str(video.id),
+        details={"qualities_set": list(body.download_urls.keys()), "status": video.status},
+        request=request,
+    )
+    await session.commit()
+
+    return {
+        "video_id": str(video.id),
+        "status": video.status,
+        "download_urls": video.download_urls,
+        "needs_download_urls_for": needs_urls,
+    }
+
+
+class VideoUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    is_free_preview: Optional[bool] = None
+    is_stream_only: Optional[bool] = None
+    chapters: Optional[list[dict]] = None
+    transcript_url: Optional[str] = None
+
+
+@router.patch("/videos/{video_id}")
+async def update_video(
+    video_id: str,
+    body: VideoUpdate,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Update video metadata and flags (free_preview, stream_only, chapters, transcript)."""
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid video_id")
+
+    video = (await session.execute(
+        select(Video).where(Video.id == vid, Video.tenant_id == user.tenant_id)
+    )).scalar_one_or_none()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if body.title is not None:
+        video.title = body.title
+    if body.description is not None:
+        video.description = body.description
+    if body.is_free_preview is not None:
+        video.is_free_preview = body.is_free_preview
+    if body.is_stream_only is not None:
+        video.is_stream_only = body.is_stream_only
+    if body.chapters is not None:
+        video.chapters = body.chapters
+    if body.transcript_url is not None:
+        video.transcript_url = body.transcript_url or None
+
+    await session.commit()
+    await session.refresh(video)
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="video.update", target_type="video", target_id=str(video.id),
+        details=body.model_dump(exclude_none=True),
+        request=request,
+    )
+    await session.commit()
+
+    return {
+        "video_id": str(video.id),
+        "title": video.title,
+        "is_free_preview": video.is_free_preview,
+        "is_stream_only": video.is_stream_only,
+        "chapters": video.chapters,
+        "transcript_url": video.transcript_url,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v1 endpoints: student management extras
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=8, max_length=200)
+
+
+@router.post("/students/{student_id}/reset-password")
+async def reset_student_password(
+    student_id: str,
+    body: ResetPasswordRequest,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Admin sets a new password for a student. Clears lockout state too."""
+    try:
+        sid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student_id")
+
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid,
+            User.tenant_id == user.tenant_id,
+            User.role == "student",
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    student.password_hash = hash_password(body.new_password)
+    student.failed_login_attempts = 0
+    student.locked_until = None
+    await session.commit()
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="student.reset_password",
+        target_type="user", target_id=str(student.id),
+        request=request,
+    )
+    await session.commit()
+
+    return {
+        "message": "Password reset",
+        "user_id": str(student.id),
+        "email": student.email,
+    }
+
+
+class StudentUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    max_devices: Optional[int] = Field(None, ge=1, le=10)
+    admin_notes: Optional[str] = Field(None, max_length=5000)
+
+
+@router.patch("/students/{student_id}")
+async def update_student(
+    student_id: str,
+    body: StudentUpdate,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    try:
+        sid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student_id")
+
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid,
+            User.tenant_id == user.tenant_id,
+            User.role == "student",
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    if body.is_active is not None:
+        student.is_active = body.is_active
+    if body.max_devices is not None:
+        student.max_devices = body.max_devices
+    if body.admin_notes is not None:
+        student.admin_notes = body.admin_notes
+    await session.commit()
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="student.update",
+        target_type="user", target_id=str(student.id),
+        details=body.model_dump(exclude_none=True),
+        request=request,
+    )
+    await session.commit()
+    return {
+        "user_id": str(student.id),
+        "is_active": student.is_active,
+        "max_devices": student.max_devices,
+        "admin_notes": student.admin_notes,
+    }
+
+
+@router.post("/students/{student_id}/devices/clear")
+async def clear_student_devices(
+    student_id: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Deregister ALL of a student's devices in one call. 'Lost my phone' flow."""
+    try:
+        sid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student_id")
+
+    devices = (await session.execute(
+        select(Device).where(Device.user_id == sid, Device.is_active.is_(True))
+    )).scalars().all()
+    count = 0
+    for d in devices:
+        d.is_active = False
+        count += 1
+    await session.commit()
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="student.clear_devices",
+        target_type="user", target_id=student_id,
+        details={"deregistered_count": count}, request=request,
+    )
+    await session.commit()
+    return {"message": "Cleared", "deregistered_count": count}
+
+
+@router.post("/students/{student_id}/login-as")
+async def login_as_student(
+    student_id: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Generate a 15-minute access token for the target student so the admin
+    can preview the player as that student does. The token carries an
+    `impersonator_id` claim — the dashboard SHOULD show a banner; the server
+    audit-logs the impersonation regardless of frontend behavior.
+    """
+    try:
+        sid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student_id")
+
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid,
+            User.tenant_id == user.tenant_id,
+            User.role == "student",
+            User.is_active.is_(True),
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Active student not found")
+
+    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    token = jwt.encode(
+        {
+            "sub": str(student.id),
+            "tenant_id": str(student.tenant_id),
+            "role": student.role,
+            "exp": expire,
+            "type": "access",
+            "impersonator_id": str(user.id),
+            "impersonator_email": user.email,
+        },
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="student.login_as",
+        target_type="user", target_id=str(student.id),
+        details={"target_email": student.email, "expires_at": expire.isoformat()},
+        request=request,
+    )
+    await session.commit()
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": 900,
+        "impersonating": {
+            "user_id": str(student.id),
+            "email": student.email,
+        },
+    }

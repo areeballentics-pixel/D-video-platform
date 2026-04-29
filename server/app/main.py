@@ -1,13 +1,15 @@
 """FastAPI application entry point.
 
-The arq worker runs in a background thread inside this process.
-One command runs everything: python -m uvicorn app.main:app --port 8000
+In v1 the server is a license + metadata API only — encryption happens on
+institute-owned machines via the SVP Encryptor desktop app, and the
+encrypted .svf files are hosted by the institute (Google Drive, etc.).
+The legacy embedded arq worker has been removed.
+
+Run: python -m uvicorn app.main:app --port 8000
 """
 
-import threading
 from contextlib import asynccontextmanager
 
-from arq.worker import run_worker
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -16,34 +18,11 @@ from app.config import settings
 from app.core.redis import close_redis, init_redis
 
 
-def _start_worker_thread():
-    """Run arq worker in a separate thread with its own event loop.
-
-    `handle_signals=False` is required on Linux: arq's default behaviour
-    calls `loop.add_signal_handler()`, which fails in non-main threads
-    with `set_wakeup_fd only works in main thread of the main interpreter`.
-    Since the worker runs inside the FastAPI process and lifespan already
-    handles shutdown via the daemon thread, arq doesn't need its own
-    signal handlers.
-    """
-    import asyncio
-    # Create a new event loop for this thread (required on Windows)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    from app.worker.settings import WorkerSettings
-    run_worker(WorkerSettings, handle_signals=False)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init Redis + start embedded arq worker. Shutdown: clean up."""
+    """Startup / shutdown — Redis only, no embedded worker."""
     await init_redis()
     print("Redis connected")
-
-    # Start worker in a daemon thread (dies automatically when main process exits)
-    worker_thread = threading.Thread(target=_start_worker_thread, daemon=True)
-    worker_thread.start()
-    print("Encryption worker started (background thread)")
 
     yield
 
@@ -54,27 +33,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Secure Video Platform API",
     version="0.1.0",
-    description="License server for the Secure Video Player",
+    description="License + metadata server for the Secure Video Platform",
     lifespan=lifespan,
-    max_upload_size=2_621_440_000,
 )
 
 # CORS — localhost origins are always allowed for dev; additional production
 # origins (e.g. the live dashboard URL) come from the ALLOWED_ORIGINS env var
 # as a comma-separated list.
 _default_origins = [
-    # Tauri player dev server
+    # Tauri player dev server (Vite default)
     "http://localhost:1420",
     "http://127.0.0.1:1420",
     "tauri://localhost",
-    # Tenant admin dashboard (dev)
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    # Master dashboard (dev) — Next.js configured to port 3002
+    # Tauri encryptor dev server — admin surface lives here in v1.5
+    "http://localhost:1421",
+    "http://127.0.0.1:1421",
+    # Master dashboard (dev) — Next.js on port 3002
     "http://localhost:3002",
     "http://127.0.0.1:3002",
+    # NOTE: the legacy tenant web dashboard on :3000 was removed in v1.5;
+    # all tenant-admin operations now live inside the encryptor app.
 ]
 _extra_origins = [
     o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()
@@ -86,11 +64,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    # Expose Range-related headers so the browser's fetch() + blob() can
-    # handle 206 Partial Content responses (which FileResponse returns
-    # whenever Chrome auto-sends `Range: bytes=0-` on a download).
-    # Without these, Chrome silently drops the response body and reports
-    # `net::ERR_FAILED 206` even though the server sent a valid response.
+    # Range-related headers were needed by the legacy /api/admin/videos/.../download
+    # endpoint that streamed .svf files. The endpoint is gone in v1 (institutes
+    # host their own files), but we keep these for forward compatibility with
+    # any future server-hosted file flow (e.g. signed redirect endpoints).
     expose_headers=[
         "Content-Disposition",
         "Content-Length",

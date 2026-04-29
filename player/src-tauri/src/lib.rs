@@ -6,14 +6,16 @@
 // the compiler won't even look at those files.
 
 // ─── Module declarations ───
+//
+// Crypto, SVF format I/O, and device fingerprinting now live in the shared
+// `svf-core` crate (../../crates/svf-core), which is also consumed by the
+// encryptor app and the mobile JNI/FFI shims. That keeps wire-format and
+// key-derivation logic bit-for-bit identical across all clients.
 pub mod commands;
-pub mod crypto;
-pub mod device;
 pub mod errors;
 pub mod license;
 pub mod player;
 pub mod security;
-pub mod svf;
 pub mod watermark;
 
 /// Build and run the Tauri application.
@@ -46,6 +48,8 @@ pub fn run() {
             commands::scan_library,
             commands::start_playback,
             commands::stop_playback,
+            commands::download_svf,
+            commands::report_watch_heartbeat,
         ])
         // ─── App setup (runs once on launch) ───
         .setup(|_app| {
@@ -63,8 +67,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod integration_tests {
-    use crate::crypto::{decrypt_chunk, SecureKey};
-    use crate::svf::SvfFile;
+    use svf_core::{decrypt_chunk, SecureKey, SvfFile};
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
 

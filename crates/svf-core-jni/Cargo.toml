@@ -1,0 +1,17 @@
+[package]
+name = "svf-core-jni"
+version = "0.1.0"
+edition = "2021"
+description = "JNI bridge from svf-core to Android Kotlin (ExoPlayer DataSource)"
+
+[lib]
+name = "svf_core_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+svf-core = { path = "../svf-core" }
+jni = { version = "0.21", default-features = false }
+hex = "0.4"
+log = "0.4"
+android_logger = "0.14"
+once_cell = "1"

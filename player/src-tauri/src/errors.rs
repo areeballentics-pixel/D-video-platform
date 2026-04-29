@@ -33,6 +33,9 @@ pub enum AppError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    SvfCore(#[from] svf_core::SvfCoreError),
 }
 
 // Tauri commands must return errors that implement `serde::Serialize`.

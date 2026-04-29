@@ -1,15 +1,15 @@
-# Dockerfile for the FastAPI license server.
+# Dockerfile for the FastAPI license server (v1).
 #
-# Includes FFmpeg (used by the embedded encryption worker for transcoding).
-# The arq worker runs in a background thread inside the FastAPI process
-# (see app/main.py lifespan) so ONE container serves both HTTP and jobs.
+# In v1 the server does NOT transcode or encrypt videos — institutes run the
+# SVP Encryptor desktop app on their own machines. This image is now ~80%
+# smaller than the legacy one: no FFmpeg, no transcode workers, no upload
+# staging directory.
 
 FROM python:3.12-slim
 
-# Install FFmpeg + build tools needed by some Python wheels (bcrypt, asyncpg).
+# Build tools needed by some Python wheels (bcrypt, asyncpg). FFmpeg is GONE.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ffmpeg \
         build-essential \
         libpq-dev && \
     rm -rf /var/lib/apt/lists/*
@@ -33,6 +33,5 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
 # Run Alembic migrations then start the server.
-# The embedded arq worker is spawned by app.main.lifespan automatically.
 CMD alembic upgrade head && \
     uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

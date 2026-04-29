@@ -18,11 +18,12 @@ dependencies = [
     # until we migrate off passlib.
     "bcrypt>=4.0,<4.1",
     "redis>=5.2.0",
-    "arq>=0.26.1",
-    "aiofiles>=24.1.0",
+    # arq + aiofiles were used by the legacy server-side encryption worker.
+    # In v1 institutes encrypt locally; the worker package is gone.
     "cryptography>=44.0.0",
     "python-multipart>=0.0.12",
     "httpx>=0.28.0",
+    "pyotp>=2.9.0",
 ]
 
 [project.optional-dependencies]

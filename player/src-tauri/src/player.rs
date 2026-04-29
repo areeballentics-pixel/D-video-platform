@@ -28,9 +28,9 @@ use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 use warp::{Filter, Reply};
 
-use crate::crypto::{decrypt_chunk, SecureKey};
+use svf_core::{decrypt_chunk, SecureKey, SvfFile};
+
 use crate::errors::AppError;
-use crate::svf::SvfFile;
 
 /// Info returned to the React frontend when playback starts
 #[derive(Debug, Clone, Serialize)]

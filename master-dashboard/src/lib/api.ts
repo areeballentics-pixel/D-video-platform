@@ -21,11 +21,26 @@ export interface TenantSummary {
   slug: string;
   is_active: boolean;
   suspended_at: string | null;
+  suspension_reason: string | null;
   created_at: string;
   student_count: number;
   admin_count: number;
   video_count: number;
+  course_count: number;
   active_device_count: number;
+  encryptor_seats_used: number;
+  encryptor_seats_total: number;
+  students_total: number;
+  videos_total: number;
+  courses_total: number;
+  // v1.5
+  tier: string;
+  monthly_price_cents: number;
+  last_admin_login_at: string | null;
+  total_storage_bytes: number;
+  new_students_30d: number;
+  new_videos_30d: number;
+  new_courses_30d: number;
 }
 
 export interface TenantCreateResponse {
@@ -41,6 +56,59 @@ export interface TenantActionResponse {
   tenant_id: string;
   is_active: boolean;
   message: string;
+}
+
+export interface PlatformStats {
+  total_tenants: number;
+  active_tenants: number;
+  suspended_tenants: number;
+  total_users: number;
+  total_admins: number;
+  total_students: number;
+  total_videos: number;
+  total_courses: number;
+  total_active_enrollments: number;
+  total_encryptor_devices: number;
+  pending_seat_upgrades: number;
+}
+
+export interface SeatUpgradeRequest {
+  id: string;
+  tenant_id: string;
+  tenant_name: string;
+  tenant_slug: string;
+  requested_by_email: string | null;
+  requested_seats: number;
+  current_seats: number;
+  status: "pending" | "fulfilled" | "rejected";
+  notes: string;
+  requested_at: string;
+  handled_at: string | null;
+  handled_notes: string | null;
+}
+
+export interface AuditEntry {
+  id: string;
+  actor_type: string;
+  actor_email: string | null;
+  action: string;
+  target_type: string | null;
+  target_id: string | null;
+  details: Record<string, unknown>;
+  ip_address: string | null;
+  occurred_at: string;
+}
+
+export interface TotpEnableResponse {
+  secret: string;
+  provisioning_uri: string;
+}
+
+export class TotpRequiredError extends Error {
+  constructor() {
+    super("TOTP code required");
+    this.name = "TotpRequiredError";
+  }
 }
 
 // ── Client ──────────────────────────────────────────────────────────────────
@@ -147,13 +215,22 @@ class MasterApiClient {
 
   // ── Auth ──────────────────────────────────────────────────────────────
 
-  async login(email: string, password: string): Promise<MasterLoginResponse> {
+  async login(
+    email: string,
+    password: string,
+    totpCode?: string,
+  ): Promise<MasterLoginResponse> {
     const res = await fetch(`${API_BASE}/api/master/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, totp_code: totpCode ?? null }),
     });
     if (!res.ok) {
+      // Server signals "TOTP required" via the X-Auth-Reason header.
+      // The login page intercepts this and re-prompts with a code field.
+      if (res.status === 401 && res.headers.get("x-auth-reason") === "totp_required") {
+        throw new TotpRequiredError();
+      }
       const body = await res.text();
       let message = "Login failed";
       try {
@@ -199,11 +276,76 @@ class MasterApiClient {
     });
   }
 
-  async suspendTenant(tenantId: string): Promise<TenantActionResponse> {
+  async suspendTenant(
+    tenantId: string,
+    reason: string = "",
+  ): Promise<TenantActionResponse> {
     return this.request<TenantActionResponse>(
       `/api/master/tenants/${tenantId}/suspend`,
-      { method: "PATCH" }
+      { method: "PATCH", body: JSON.stringify({ reason }) },
     );
+  }
+
+  async bulkTenantAction(
+    tenantIds: string[],
+    action: "suspend" | "reactivate",
+    reason: string = "",
+  ): Promise<{ successes: string[]; failures: Record<string, string> }> {
+    return this.request("/api/master/tenants/bulk-action", {
+      method: "POST",
+      body: JSON.stringify({ tenant_ids: tenantIds, action, reason }),
+    });
+  }
+
+  async generateRecoveryCodes(): Promise<{ codes: string[] }> {
+    return this.request("/api/master/me/totp/recovery-codes", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async impersonateTenantAdmin(
+    tenantId: string,
+  ): Promise<{
+    access_token: string;
+    expires_in: number;
+    impersonating_user_id: string;
+    impersonating_email: string;
+    tenant_id: string;
+  }> {
+    return this.request(
+      `/api/master/tenants/${tenantId}/impersonate`,
+      { method: "POST", body: JSON.stringify({}) },
+    );
+  }
+
+  async masterAudit(params: {
+    action?: string;
+    actor_email?: string;
+    tenant_id?: string;
+    since_days?: number;
+    limit?: number;
+  }): Promise<
+    Array<{
+      id: string;
+      tenant_id: string | null;
+      actor_type: string;
+      actor_email: string | null;
+      action: string;
+      target_type: string | null;
+      target_id: string | null;
+      details: Record<string, unknown>;
+      ip_address: string | null;
+      occurred_at: string;
+    }>
+  > {
+    const q = new URLSearchParams();
+    if (params.action) q.set("action", params.action);
+    if (params.actor_email) q.set("actor_email", params.actor_email);
+    if (params.tenant_id) q.set("tenant_id", params.tenant_id);
+    if (params.since_days) q.set("since_days", String(params.since_days));
+    if (params.limit) q.set("limit", String(params.limit));
+    return this.request(`/api/master/audit?${q.toString()}`);
   }
 
   async reactivateTenant(tenantId: string): Promise<TenantActionResponse> {
@@ -222,6 +364,129 @@ class MasterApiClient {
       `/api/master/tenants/${tenantId}?confirm_slug=${encoded}`,
       { method: "DELETE" }
     );
+  }
+
+  async listTenantEncryptors(
+    tenantId: string,
+  ): Promise<{
+    tenant_id: string;
+    tenant_name: string;
+    seats_used: number;
+    seats_total: number;
+    devices: Array<{
+      id: string;
+      fingerprint: string;
+      hostname: string;
+      os_version: string;
+      is_active: boolean;
+      registered_at: string;
+      last_seen_at: string;
+      last_master_key_fetch_at: string;
+    }>;
+  }> {
+    return this.request(`/api/master/tenants/${tenantId}/encryptors`);
+  }
+
+  async deregisterTenantEncryptor(
+    tenantId: string,
+    deviceId: string,
+  ): Promise<TenantActionResponse> {
+    return this.request<TenantActionResponse>(
+      `/api/master/tenants/${tenantId}/encryptors/${deviceId}`,
+      { method: "DELETE" },
+    );
+  }
+
+  async updateTenantLimits(
+    tenantId: string,
+    limits: {
+      max_encryptor_devices?: number;
+      max_students?: number;
+      max_videos?: number;
+      max_courses?: number;
+    },
+  ): Promise<TenantActionResponse> {
+    return this.request<TenantActionResponse>(
+      `/api/master/tenants/${tenantId}/limits`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(limits),
+      },
+    );
+  }
+
+  // ── Platform stats ────────────────────────────────────────────────────
+
+  async getStats(): Promise<PlatformStats> {
+    return this.request<PlatformStats>("/api/master/stats");
+  }
+
+  // ── Seat upgrade requests ─────────────────────────────────────────────
+
+  async listUpgradeRequests(
+    statusFilter: "pending" | "fulfilled" | "rejected" | "all" = "pending",
+  ): Promise<SeatUpgradeRequest[]> {
+    return this.request<SeatUpgradeRequest[]>(
+      `/api/master/upgrade-requests?status_filter=${statusFilter}`,
+    );
+  }
+
+  async fulfillUpgradeRequest(
+    requestId: string,
+    body: { new_max_encryptor_devices?: number; handled_notes?: string },
+  ): Promise<SeatUpgradeRequest> {
+    return this.request<SeatUpgradeRequest>(
+      `/api/master/upgrade-requests/${requestId}/fulfill`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          new_max_encryptor_devices: body.new_max_encryptor_devices ?? null,
+          handled_notes: body.handled_notes ?? "",
+        }),
+      },
+    );
+  }
+
+  async rejectUpgradeRequest(
+    requestId: string,
+    handledNotes: string,
+  ): Promise<SeatUpgradeRequest> {
+    return this.request<SeatUpgradeRequest>(
+      `/api/master/upgrade-requests/${requestId}/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          new_max_encryptor_devices: null,
+          handled_notes: handledNotes,
+        }),
+      },
+    );
+  }
+
+  // ── 2FA (TOTP) ────────────────────────────────────────────────────────
+
+  async totpEnable(): Promise<TotpEnableResponse> {
+    return this.request<TotpEnableResponse>("/api/master/me/totp/enable", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  async totpConfirm(code: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>("/api/master/me/totp/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  async totpDisable(
+    password: string,
+    code: string,
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>("/api/master/me/totp/disable", {
+      method: "POST",
+      body: JSON.stringify({ password, code }),
+    });
   }
 }
 

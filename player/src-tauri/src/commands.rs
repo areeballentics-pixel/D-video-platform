@@ -11,13 +11,12 @@ use serde::Serialize;
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
-use crate::crypto::SecureKey;
-use crate::device::DeviceInfo;
+use svf_core::{DeviceInfo, SecureKey, SvfFile, SvfInfo};
+
 use crate::errors::AppError;
 use crate::license::LicenseManager;
 use crate::player::{PlaybackInfo, VideoServer};
 use crate::security::SecurityMonitor;
-use crate::svf::{SvfFile, SvfInfo};
 use crate::watermark::WatermarkRotator;
 
 /// Application-wide state, managed by Tauri.
@@ -63,12 +62,163 @@ pub struct AuthStatus {
 
 #[tauri::command]
 pub fn get_device_info() -> Result<DeviceInfo, AppError> {
-    crate::device::collect_fingerprint()
+    Ok(svf_core::collect_fingerprint()?)
 }
 
 #[tauri::command]
 pub fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+
+// ─── v1: Download .svf from institute-hosted URL ────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DownloadInput {
+    pub video_id: String,
+    pub quality: String,
+    /// Where to save the .svf — usually "<library_dir>/{video_id}_{quality}.svf"
+    pub output_path: String,
+}
+
+
+#[derive(Debug, serde::Serialize)]
+pub struct DownloadResult {
+    pub output_path: String,
+    pub bytes_written: u64,
+}
+
+
+/// Resolve the per-quality download URL via /api/videos/key, then stream the
+/// .svf to disk. The server-returned `content_hash` is the hash of the
+/// pre-encryption original — it can't be verified mid-download, but the
+/// existing per-chunk hashes in the .svf header catch tampering at playback.
+#[tauri::command]
+pub async fn download_svf(
+    input: DownloadInput,
+    state: State<'_, AppState>,
+) -> Result<DownloadResult, AppError> {
+    use std::io::Write;
+
+    let device = svf_core::collect_fingerprint()?;
+    let lm = state.license_manager.lock().await;
+    let server_url = lm.server_url().to_string();
+    let token = lm
+        .access_token()
+        .ok_or_else(|| AppError::License("Not authenticated".into()))?
+        .to_string();
+    drop(lm);
+
+    let client = reqwest::Client::new();
+    let key_url = format!("{}/api/videos/key", server_url);
+    let key_resp: serde_json::Value = client
+        .post(&key_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "video_id": input.video_id,
+            "quality": input.quality,
+            "device_fingerprint": device.fingerprint,
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::Network(e))?
+        .error_for_status()
+        .map_err(|e| AppError::Network(e))?
+        .json()
+        .await
+        .map_err(|e| AppError::Network(e))?;
+
+    // If a download URL is published, fetch from there. Otherwise the file
+    // is expected to be sideloaded (USB, pendrive, manual copy) into the
+    // local library. We return a special-cased error string the React side
+    // recognizes and turns into a "place this file in your library folder"
+    // hint instead of a generic error.
+    let download_url = match key_resp.get("download_url").and_then(|v| v.as_str()) {
+        Some(url) if !url.is_empty() => url,
+        _ => {
+            return Err(AppError::License(format!(
+                "no_download_url:{}",
+                input.output_path
+            )));
+        }
+    };
+
+    // Stream-download to avoid loading the whole .svf into memory.
+    let mut resp = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| AppError::Network(e))?
+        .error_for_status()
+        .map_err(|e| AppError::Network(e))?;
+
+    if let Some(parent) = std::path::Path::new(&input.output_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::File::create(&input.output_path)?;
+    let mut bytes_written: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| AppError::Network(e))? {
+        file.write_all(&chunk)?;
+        bytes_written += chunk.len() as u64;
+    }
+    file.sync_all()?;
+
+    // Sanity-check the file parses as a valid .svf — catches "Drive served
+    // a 404 HTML page disguised as a 200" type failures cleanly here rather
+    // than at playback time when the user is staring at a spinner.
+    let _ = svf_core::SvfFile::open(&input.output_path)
+        .map_err(|e| AppError::License(format!(
+            "Downloaded file is not a valid .svf: {}", e
+        )))?;
+
+    Ok(DownloadResult {
+        output_path: input.output_path,
+        bytes_written,
+    })
+}
+
+
+// ─── v1: Watch-event heartbeats ────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct HeartbeatInput {
+    pub video_id: String,
+    pub position_ms: u64,
+    pub watched_delta_ms: u32,
+    pub course_id: Option<String>,
+}
+
+
+/// Send a single heartbeat to /api/watch-events/heartbeat. The frontend ticks
+/// this every 15-30 seconds while playback is active.
+#[tauri::command]
+pub async fn report_watch_heartbeat(
+    input: HeartbeatInput,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let lm = state.license_manager.lock().await;
+    let server_url = lm.server_url().to_string();
+    let token = lm
+        .access_token()
+        .ok_or_else(|| AppError::License("Not authenticated".into()))?
+        .to_string();
+    drop(lm);
+
+    let url = format!("{}/api/watch-events/heartbeat", server_url);
+    let _ = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "video_id": input.video_id,
+            "position_ms": input.position_ms,
+            "watched_delta_ms": input.watched_delta_ms,
+            "course_id": input.course_id,
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::Network(e))?;
+    // Best-effort: heartbeat failures don't fail playback.
+    Ok(())
 }
 
 // ─── Auth Commands ───
@@ -90,7 +240,7 @@ pub async fn login(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<AuthStatus, AppError> {
-    let device = crate::device::collect_fingerprint()?;
+    let device = svf_core::collect_fingerprint()?;
     let mut lm = state.license_manager.lock().await;
     lm.login(&email, &password, &device.fingerprint).await?;
 
@@ -106,7 +256,7 @@ pub async fn login_with_key(
     license_key: String,
     state: State<'_, AppState>,
 ) -> Result<AuthStatus, AppError> {
-    let device = crate::device::collect_fingerprint()?;
+    let device = svf_core::collect_fingerprint()?;
     let mut lm = state.license_manager.lock().await;
     lm.login_with_key(&license_key, &device.fingerprint).await?;
 
@@ -205,7 +355,7 @@ pub async fn start_playback(
     let svf = SvfFile::open(&svf_path)?;
 
     // Get the device fingerprint
-    let device = crate::device::collect_fingerprint()?;
+    let device = svf_core::collect_fingerprint()?;
 
     // Fetch the decryption key. When the tenant master key is cached, this
     // derives the per-video key locally (fully offline). Otherwise it falls

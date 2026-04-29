@@ -68,6 +68,11 @@ struct TokenResponse {
 #[derive(Debug, Deserialize)]
 struct VideoKeyResponse {
     key: String,
+    // The v1 server response also carries `download_url`, `content_hash`,
+    // `file_size`, `is_stream_only`, and `chapters`. We only need `key` here
+    // for the offline-grace key lookup; the new download flow in
+    // `commands::download_svf` parses those extra fields via `serde_json::Value`
+    // directly. serde silently ignores unknown fields, so old servers also work.
 }
 
 #[derive(Debug, Deserialize)]
@@ -404,12 +409,15 @@ impl LicenseManager {
     }
 
     /// Map the numeric quality from the .svf header to the string form
-    /// used in the cache and server API.
+    /// used in the cache and server API. The encryptor uses 65535 ("original")
+    /// when an input doesn't match a standard bucket — pendrives, scratch
+    /// recordings, etc. — so the player must accept it as a valid label too.
     fn quality_to_str(quality: u16) -> Result<&'static str, AppError> {
         match quality {
             0 => Ok("480p"),
             1 => Ok("720p"),
             2 => Ok("1080p"),
+            65535 => Ok("original"),
             q => Err(AppError::License(format!("Unknown quality: {}", q))),
         }
     }
@@ -472,6 +480,16 @@ impl LicenseManager {
     /// Returns the authenticated user's email, if any.
     pub fn user_email(&self) -> Option<&str> {
         self.user_email.as_deref()
+    }
+
+    /// API server base URL (no trailing slash).
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+
+    /// Current bearer token, if logged in.
+    pub fn access_token(&self) -> Option<&str> {
+        self.access_token.as_deref()
     }
 
     /// Build a LicenseInfo snapshot for the frontend.

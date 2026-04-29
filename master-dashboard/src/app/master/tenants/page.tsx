@@ -16,6 +16,30 @@ function formatDate(s: string | null): string {
   });
 }
 
+function formatBytes(n: number): string {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+function formatRel(iso: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  const days = Math.floor(ms / 86_400_000);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
+}
+
 /** Stats tile shown at the top of the page. */
 function StatTile({
   label,
@@ -67,6 +91,29 @@ export default function TenantsPage() {
   const [deleteTarget, setDeleteTarget] = useState<TenantSummary | null>(null);
   const [deleteSlugInput, setDeleteSlugInput] = useState("");
 
+  // Edit-quotas modal — covers encryptor seats AND student/video/course caps.
+  const [seatsTarget, setSeatsTarget] = useState<TenantSummary | null>(null);
+  const [seatsInput, setSeatsInput] = useState<number>(1);
+  const [studentsInput, setStudentsInput] = useState<number>(50);
+  const [videosInput, setVideosInput] = useState<number>(100);
+  const [coursesInput, setCoursesInput] = useState<number>(20);
+  const [tierInput, setTierInput] = useState<string>("Free");
+  const [priceInput, setPriceInput] = useState<number>(0); // rupees
+
+  // Encryptor-devices drawer (master-only deregister flow).
+  const [encryptorsTarget, setEncryptorsTarget] =
+    useState<TenantSummary | null>(null);
+
+  // Suspend-with-reason modal
+  const [suspendTarget, setSuspendTarget] = useState<TenantSummary | null>(null);
+  const [suspendReason, setSuspendReason] = useState("");
+
+  // Impersonation token modal — shown after the master clicks "Impersonate"
+  const [impersonationToken, setImpersonationToken] = useState<{
+    token: string;
+    email: string;
+  } | null>(null);
+
   const load = useCallback(async () => {
     try {
       setLoading(true);
@@ -116,11 +163,11 @@ export default function TenantsPage() {
     }
   };
 
-  const handleSuspend = async (t: TenantSummary) => {
+  const handleSuspend = async (t: TenantSummary, reason: string) => {
     setActing(t.id);
     setError("");
     try {
-      await api.suspendTenant(t.id);
+      await api.suspendTenant(t.id, reason);
       setTenants((prev) =>
         prev.map((x) =>
           x.id === t.id
@@ -128,6 +175,7 @@ export default function TenantsPage() {
                 ...x,
                 is_active: false,
                 suspended_at: new Date().toISOString(),
+                suspension_reason: reason || null,
               }
             : x
         )
@@ -167,6 +215,62 @@ export default function TenantsPage() {
       setDeleteSlugInput("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setActing(null);
+    }
+  };
+
+  const handleSaveSeats = async () => {
+    if (!seatsTarget) return;
+    setActing(seatsTarget.id);
+    setError("");
+    try {
+      // Send only the fields that actually changed — server treats nulls
+      // as "leave this cap alone", so sending all four every time would
+      // bypass the partial-update semantic.
+      const limits: {
+        max_encryptor_devices?: number;
+        max_students?: number;
+        max_videos?: number;
+        max_courses?: number;
+        tier?: string;
+        monthly_price_cents?: number;
+      } = {};
+      if (seatsInput !== seatsTarget.encryptor_seats_total)
+        limits.max_encryptor_devices = seatsInput;
+      if (studentsInput !== seatsTarget.students_total)
+        limits.max_students = studentsInput;
+      if (videosInput !== seatsTarget.videos_total)
+        limits.max_videos = videosInput;
+      if (coursesInput !== seatsTarget.courses_total)
+        limits.max_courses = coursesInput;
+      if (tierInput !== seatsTarget.tier) limits.tier = tierInput;
+      const priceCents = Math.round(priceInput * 100);
+      if (priceCents !== seatsTarget.monthly_price_cents)
+        limits.monthly_price_cents = priceCents;
+
+      if (Object.keys(limits).length === 0) {
+        setSeatsTarget(null);
+        return;
+      }
+
+      await api.updateTenantLimits(seatsTarget.id, limits);
+      setTenants((prev) =>
+        prev.map((x) =>
+          x.id === seatsTarget.id
+            ? {
+                ...x,
+                encryptor_seats_total: seatsInput,
+                students_total: studentsInput,
+                videos_total: videosInput,
+                courses_total: coursesInput,
+              }
+            : x,
+        ),
+      );
+      setSeatsTarget(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
     } finally {
       setActing(null);
     }
@@ -281,10 +385,19 @@ export default function TenantsPage() {
                   Devices
                 </th>
                 <th className="px-5 py-3.5 text-center text-xs font-semibold uppercase tracking-wider text-text-muted">
+                  Encryptor Seats
+                </th>
+                <th className="px-5 py-3.5 text-center text-xs font-semibold uppercase tracking-wider text-text-muted">
                   Status
                 </th>
                 <th className="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-text-muted">
-                  Created
+                  Tier
+                </th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-text-muted">
+                  Storage
+                </th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-text-muted">
+                  Last login
                 </th>
                 <th className="px-5 py-3.5 text-right text-xs font-semibold uppercase tracking-wider text-text-muted">
                   Actions
@@ -329,6 +442,23 @@ export default function TenantsPage() {
                       {t.active_device_count}
                     </td>
                     <td className="px-5 py-4 text-center">
+                      <button
+                        onClick={() => {
+                          setSeatsTarget(t);
+                          setSeatsInput(t.encryptor_seats_total);
+                          setStudentsInput(t.students_total);
+                          setVideosInput(t.videos_total);
+                          setCoursesInput(t.courses_total);
+                          setTierInput(t.tier);
+                          setPriceInput(t.monthly_price_cents / 100);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-mono text-text-primary transition-colors hover:bg-bg-surface-hover"
+                        title="Click to edit the seat cap"
+                      >
+                        {t.encryptor_seats_used} / {t.encryptor_seats_total}
+                      </button>
+                    </td>
+                    <td className="px-5 py-4 text-center">
                       <span
                         className={`inline-flex rounded-md px-2.5 py-1 text-xs font-semibold ${
                           t.is_active
@@ -339,14 +469,60 @@ export default function TenantsPage() {
                         {t.is_active ? "Active" : "Suspended"}
                       </span>
                     </td>
+                    <td className="px-5 py-4 text-sm">
+                      <div className="text-text-primary">{t.tier}</div>
+                      {t.monthly_price_cents > 0 && (
+                        <div className="text-xs text-text-muted">
+                          ₹{(t.monthly_price_cents / 100).toFixed(0)}/mo
+                        </div>
+                      )}
+                    </td>
                     <td className="px-5 py-4 text-sm text-text-muted">
-                      {formatDate(t.created_at)}
+                      {formatBytes(t.total_storage_bytes)}
+                    </td>
+                    <td className="px-5 py-4 text-sm text-text-muted">
+                      {formatRel(t.last_admin_login_at)}
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => setEncryptorsTarget(t)}
+                          disabled={busy}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-text-muted transition-colors hover:bg-bg-surface-hover disabled:opacity-50"
+                        >
+                          Encryptors
+                        </button>
+                        <button
+                          onClick={async () => {
+                            setActing(t.id);
+                            setError("");
+                            try {
+                              const r = await api.impersonateTenantAdmin(t.id);
+                              setImpersonationToken({
+                                token: r.access_token,
+                                email: r.impersonating_email,
+                              });
+                            } catch (err) {
+                              setError(
+                                err instanceof Error
+                                  ? err.message
+                                  : "Impersonation failed",
+                              );
+                            } finally {
+                              setActing(null);
+                            }
+                          }}
+                          disabled={busy}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-primary/30 px-3 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
+                        >
+                          Impersonate
+                        </button>
                         {t.is_active ? (
                           <button
-                            onClick={() => handleSuspend(t)}
+                            onClick={() => {
+                              setSuspendTarget(t);
+                              setSuspendReason("");
+                            }}
                             disabled={busy}
                             className="inline-flex items-center gap-1.5 rounded-lg border border-warning/30 px-3 py-1.5 text-xs font-medium text-warning transition-colors hover:bg-warning/10 disabled:opacity-50"
                           >
@@ -567,6 +743,235 @@ export default function TenantsPage() {
         </div>
       )}
 
+      {/* ─── Encryptors Drawer (master deregister) ─── */}
+      {encryptorsTarget && (
+        <EncryptorsDrawer
+          tenant={encryptorsTarget}
+          onClose={() => setEncryptorsTarget(null)}
+          onChanged={load}
+        />
+      )}
+
+      {/* ─── Suspend with reason modal ─── */}
+      {suspendTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          onClick={() => setSuspendTarget(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-warning/40 bg-bg-surface p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-lg font-bold text-text-primary">
+              Suspend {suspendTarget.name}?
+            </h2>
+            <p className="mb-4 text-xs text-text-muted">
+              All API access stops immediately. Students already in offline
+              mode keep playing for the grace period (default 20 days). The
+              reason below is shown to the tenant admin on next login attempt.
+            </p>
+            <label className="mb-1.5 block text-sm font-medium text-text-muted">
+              Reason (shown to tenant)
+            </label>
+            <textarea
+              rows={3}
+              autoFocus
+              value={suspendReason}
+              onChange={(e) => setSuspendReason(e.target.value)}
+              placeholder="e.g. Payment overdue. Contact billing@..."
+              className="w-full rounded-lg border border-border bg-bg-primary px-3 py-2 text-sm text-text-primary outline-none focus:border-warning focus:ring-1 focus:ring-warning"
+            />
+            <div className="mt-5 flex gap-3">
+              <button
+                onClick={() => setSuspendTarget(null)}
+                disabled={acting === suspendTarget.id}
+                className="flex-1 rounded-lg border border-border px-4 py-2 text-sm font-medium text-text-muted hover:bg-bg-surface-hover disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  await handleSuspend(suspendTarget, suspendReason);
+                  setSuspendTarget(null);
+                  setSuspendReason("");
+                }}
+                disabled={acting === suspendTarget.id}
+                className="flex-1 rounded-lg bg-warning px-4 py-2 text-sm font-semibold text-white hover:bg-warning/90 disabled:opacity-50"
+              >
+                {acting === suspendTarget.id ? "Suspending…" : "Suspend"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Impersonation token modal ─── */}
+      {impersonationToken && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          onClick={() => setImpersonationToken(null)}
+        >
+          <div
+            className="w-full max-w-xl rounded-xl border border-primary/40 bg-bg-surface p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-lg font-bold text-text-primary">
+              Impersonation token issued
+            </h2>
+            <p className="mb-3 text-xs text-text-muted">
+              15-minute access token for{" "}
+              <span className="font-mono text-text-primary">
+                {impersonationToken.email}
+              </span>
+              . Use it to debug a tenant's issue. Audit-logged.
+            </p>
+            <p className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+              Paste this token into the encryptor app's{" "}
+              <code>localStorage.access_token</code> via DevTools to act as
+              that admin. UI helpers for one-click impersonation come in v1.6.
+            </p>
+            <code className="mb-4 block max-h-40 overflow-auto break-all rounded-md border border-border bg-bg-primary p-3 font-mono text-xs text-text-primary">
+              {impersonationToken.token}
+            </code>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(
+                      impersonationToken.token,
+                    );
+                  } catch {
+                    /* no clipboard, no fallback — token is selectable */
+                  }
+                }}
+                className="flex-1 rounded-lg border border-border px-4 py-2 text-sm font-medium text-text-muted hover:bg-bg-surface-hover"
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => setImpersonationToken(null)}
+                className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Edit Quotas Modal — encryptor seats + student/video/course caps ─── */}
+      {seatsTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-lg rounded-xl border border-border bg-bg-surface p-6">
+            <div className="mb-4">
+              <h2 className="text-lg font-bold text-text-primary">
+                Resource quotas
+              </h2>
+              <p className="mt-1 text-xs text-text-muted">
+                {seatsTarget.name} ·{" "}
+                <span className="font-mono">{seatsTarget.slug}</span>
+              </p>
+            </div>
+
+            <QuotaRow
+              label="Encryptor seats"
+              used={seatsTarget.encryptor_seats_used}
+              value={seatsInput}
+              onChange={setSeatsInput}
+              min={1}
+              max={100}
+              floor={seatsTarget.encryptor_seats_used}
+            />
+            <QuotaRow
+              label="Students"
+              used={seatsTarget.student_count}
+              value={studentsInput}
+              onChange={setStudentsInput}
+              min={0}
+              max={100000}
+              floor={seatsTarget.student_count}
+            />
+            <QuotaRow
+              label="Videos"
+              used={seatsTarget.video_count}
+              value={videosInput}
+              onChange={setVideosInput}
+              min={0}
+              max={100000}
+              floor={seatsTarget.video_count}
+            />
+            <QuotaRow
+              label="Courses"
+              used={seatsTarget.course_count}
+              value={coursesInput}
+              onChange={setCoursesInput}
+              min={0}
+              max={100000}
+              floor={seatsTarget.course_count}
+            />
+
+            {/* Tier + price — same modal, no separate flow needed since
+                they go through the same /limits endpoint */}
+            <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border pt-4">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-text-muted">
+                  Tier label
+                </label>
+                <input
+                  type="text"
+                  value={tierInput}
+                  onChange={(e) => setTierInput(e.target.value)}
+                  placeholder="Free / Starter / Pro / Custom"
+                  className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2 text-sm text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-text-muted">
+                  Monthly price (₹)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={priceInput}
+                  onChange={(e) =>
+                    setPriceInput(parseFloat(e.target.value) || 0)
+                  }
+                  className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2 text-sm text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                />
+              </div>
+            </div>
+
+            <p className="mt-3 text-xs text-text-muted/70">
+              Caps below current usage are rejected — ask the tenant to
+              archive resources first if you want to downsize.
+            </p>
+
+            <div className="mt-5 flex gap-3">
+              <button
+                onClick={() => setSeatsTarget(null)}
+                disabled={acting === seatsTarget.id}
+                className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-muted transition-colors hover:bg-bg-surface-hover disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveSeats}
+                disabled={
+                  acting === seatsTarget.id ||
+                  seatsInput < seatsTarget.encryptor_seats_used ||
+                  studentsInput < seatsTarget.student_count ||
+                  videosInput < seatsTarget.video_count ||
+                  coursesInput < seatsTarget.course_count
+                }
+                className="flex-1 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-hover disabled:opacity-50"
+              >
+                {acting === seatsTarget.id ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ─── Delete Confirmation Modal ─── */}
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
@@ -704,6 +1109,236 @@ function Field({
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Slide-over drawer listing a tenant's encryptor devices with master-only
+ *  deregister buttons. The tenant-admin app no longer has these — the policy
+ *  is "platform owner controls who holds the master key". */
+function EncryptorsDrawer({
+  tenant,
+  onClose,
+  onChanged,
+}: {
+  tenant: TenantSummary;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  type Device = {
+    id: string;
+    fingerprint: string;
+    hostname: string;
+    os_version: string;
+    is_active: boolean;
+    last_seen_at: string;
+    last_master_key_fetch_at: string;
+  };
+  const [data, setData] = useState<{
+    seats_used: number;
+    seats_total: number;
+    devices: Device[];
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [acting, setActing] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api.listTenantEncryptors(tenant.id);
+      setData({
+        seats_used: r.seats_used,
+        seats_total: r.seats_total,
+        devices: r.devices,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  }, [tenant.id]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const dereg = async (id: string, hostname: string) => {
+    if (
+      !confirm(
+        `Deregister "${hostname || id}"? Frees the seat. The encryptor app on that device will fail to load the master key on its next launch.`,
+      )
+    ) {
+      return;
+    }
+    setActing(id);
+    try {
+      await api.deregisterTenantEncryptor(tenant.id, id);
+      await load();
+      onChanged(); // refresh the parent tenants list (seat count etc)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Deregister failed");
+    } finally {
+      setActing(null);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl overflow-y-auto bg-bg-surface p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-text-primary">
+              Encryptor devices · {tenant.name}
+            </h2>
+            <p className="text-xs text-text-muted">
+              Deregister revokes a device's ability to fetch the master key on
+              next launch. Audit-logged.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-1 text-sm text-text-muted hover:bg-bg-surface-hover"
+          >
+            Close
+          </button>
+        </div>
+
+        {error && (
+          <p className="mb-3 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">
+            {error}
+          </p>
+        )}
+
+        {data && (
+          <p className="mb-4 text-sm text-text-muted">
+            <span className="font-mono text-text-primary">
+              {data.seats_used} / {data.seats_total}
+            </span>{" "}
+            seats in use
+          </p>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center py-10">
+            <div className="h-7 w-7 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          </div>
+        ) : !data || data.devices.length === 0 ? (
+          <p className="rounded-xl border border-border bg-bg-primary py-10 text-center text-sm text-text-muted">
+            No encryptor devices registered for this tenant.
+          </p>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-border">
+            <table className="w-full text-sm">
+              <thead className="bg-bg-primary text-xs uppercase tracking-wider text-text-muted">
+                <tr>
+                  <th className="px-3 py-2 text-left">Device</th>
+                  <th className="px-3 py-2 text-left">Last seen</th>
+                  <th className="px-3 py-2 text-center">Status</th>
+                  <th className="px-3 py-2 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border bg-bg-surface">
+                {data.devices.map((d) => (
+                  <tr key={d.id} className="hover:bg-bg-surface-hover">
+                    <td className="px-3 py-2">
+                      <div className="text-text-primary">
+                        {d.hostname || "(unnamed)"}
+                      </div>
+                      <div className="font-mono text-xs text-text-muted">
+                        {d.fingerprint} · {d.os_version}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-text-muted">
+                      {new Date(d.last_seen_at).toLocaleString()}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <span
+                        className={`rounded px-2 py-0.5 text-xs ${
+                          d.is_active
+                            ? "bg-success/10 text-success"
+                            : "bg-error/10 text-error"
+                        }`}
+                      >
+                        {d.is_active ? "active" : "deregistered"}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {d.is_active && (
+                        <button
+                          onClick={() => dereg(d.id, d.hostname)}
+                          disabled={acting === d.id}
+                          className="rounded-md border border-error/30 px-2.5 py-1 text-xs text-error hover:bg-error/10 disabled:opacity-50"
+                        >
+                          {acting === d.id ? "…" : "Deregister"}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Single quota row in the edit-quotas modal. Shows current usage so the
+ *  master can't accidentally set a cap below it (the disabled-Save guard
+ *  in the parent modal enforces this). */
+function QuotaRow({
+  label,
+  used,
+  value,
+  onChange,
+  min,
+  max,
+  floor,
+}: {
+  label: string;
+  used: number;
+  value: number;
+  onChange: (n: number) => void;
+  min: number;
+  max: number;
+  floor: number;
+}) {
+  const tooLow = value < floor;
+  return (
+    <div className="mb-3">
+      <div className="mb-1 flex items-baseline justify-between">
+        <label className="text-sm font-medium text-text-muted">{label}</label>
+        <span className="text-xs text-text-muted/70">
+          using {used} of {value}
+        </span>
+      </div>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) =>
+          onChange(Math.max(min, parseInt(e.target.value, 10) || min))
+        }
+        className={`w-full rounded-lg border bg-bg-primary px-4 py-2 text-sm text-text-primary outline-none focus:ring-1 ${
+          tooLow
+            ? "border-error focus:border-error focus:ring-error"
+            : "border-border focus:border-primary focus:ring-primary"
+        }`}
+      />
+      {tooLow && (
+        <p className="mt-1 text-xs text-error">
+          Below current usage ({used}). Ask the tenant to archive items first.
+        </p>
+      )}
     </div>
   );
 }

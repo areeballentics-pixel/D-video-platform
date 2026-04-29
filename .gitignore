@@ -1,6 +1,10 @@
 # ─── Rust ───
-player/src-tauri/target/
+# Workspace-level target/ (shared by all Cargo workspace members) plus any
+# legacy per-crate target/ folders left over from before the workspace move.
+target/
+**/target/
 **/*.rs.bk
+Cargo.lock.bak
 
 # ─── Node.js ───
 node_modules/
@@ -25,6 +29,11 @@ env/
 !.env.prod.example
 *.pem
 *.key
+# .mcp.json holds Claude Code MCP server configs — token-shaped if anyone
+# hardcodes (don't). The prompt-on-startup pattern keeps it secret-free,
+# but gitignore is defense-in-depth.
+.mcp.json
+.mcp.local.json
 
 # ─── IDE ───
 .idea/

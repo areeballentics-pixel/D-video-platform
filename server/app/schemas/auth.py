@@ -1,10 +1,15 @@
 """Auth request/response schemas."""
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # Plain `str`, not `EmailStr` — pydantic's email-validator rejects
+    # `.local`, `.internal`, etc. per RFC 6761, which trips up institutes
+    # using internal-only email domains. The DB unique constraint on
+    # `(tenant_id, email)` still prevents duplicates; format-shaping is a
+    # UX-layer concern, not a security one.
+    email: str
     password: str
     device_fingerprint: str
     hostname: str = ""

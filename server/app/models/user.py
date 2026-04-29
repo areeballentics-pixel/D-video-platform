@@ -25,6 +25,17 @@ class User(Base):
     max_devices: Mapped[int] = mapped_column(Integer, default=2)
     max_device_changes_per_30d: Mapped[int] = mapped_column(Integer, default=2)
 
+    # ── v1: login tracking + lockout ──
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Free-form admin-only notes ("paid late, extend by 1mo"). Never shown to students.
+    admin_notes: Mapped[str | None] = mapped_column(String(5000), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -40,4 +51,3 @@ class User(Base):
     # Relationships
     tenant = relationship("Tenant", back_populates="users")
     devices = relationship("Device", back_populates="user", lazy="selectin")
-    licenses = relationship("License", back_populates="user", lazy="selectin")
