@@ -1,6 +1,6 @@
 // player.rs — Video playback via embedded local HTTP server
 //
-// This is the core playback engine. When a user clicks "play" on an .svf file:
+// When a user clicks "play" on an .svf file:
 //
 // 1. We parse the .svf file and derive the decryption key
 // 2. We spawn a tiny HTTP server on 127.0.0.1 with a random port
@@ -12,6 +12,12 @@
 //    c. Slice out the exact bytes requested
 //    d. Return them with proper 206 Partial Content headers
 // 6. When playback stops, we shut down the server and zero the key
+//
+// IMPORTANT: this only works because tauri.conf.json sets
+// `app.windows[].useHttpsScheme = false` (default in v1.5). With the default
+// HTTPS scheme the page loads from `https://tauri.localhost`, and Chromium's
+// mixed-content auto-upgrade silently blocks `http://127.0.0.1:*` <video>
+// URLs — leaving a black screen at 0:00 with no JS error.
 //
 // Security:
 // - Server binds to 127.0.0.1 only (not 0.0.0.0)
@@ -263,13 +269,6 @@ impl Drop for VideoServer {
 
 // ─── Helper functions ───
 
-/// Parse the HTTP Range header into (start, end) byte positions.
-///
-/// Handles formats:
-/// - "bytes=0-"       → (0, total - 1)
-/// - "bytes=100-200"  → (100, 200)
-/// - "bytes=100-"     → (100, total - 1)
-/// - None / invalid   → (0, total - 1)
 /// Maximum bytes to return in a single response.
 /// The browser will send follow-up Range requests for the rest.
 /// 2 MB keeps memory usage low and response time fast.
@@ -305,8 +304,6 @@ fn parse_range_header(range: &Option<String>, total_size: u64) -> (u64, u64) {
                 s.parse::<u64>().ok()
             }
         })
-        // If no end specified (open-ended range like "bytes=100-"),
-        // return at most MAX_RESPONSE_BYTES from start
         .unwrap_or_else(|| (start + MAX_RESPONSE_BYTES - 1).min(total_size - 1))
         .min(total_size - 1);
 
@@ -314,9 +311,6 @@ fn parse_range_header(range: &Option<String>, total_size: u64) -> (u64, u64) {
 }
 
 /// Decrypt the byte range [range_start, range_end] from the encrypted video.
-///
-/// This maps the requested byte range to encrypted chunks, decrypts only
-/// the needed chunks, and slices out the exact bytes requested.
 async fn decrypt_range(
     state: &PlaybackState,
     range_start: u64,
@@ -325,28 +319,19 @@ async fn decrypt_range(
     chunk_count: usize,
     nonce: &[u8; 16],
 ) -> Result<Vec<u8>, AppError> {
-    // Which chunks do we need to decrypt?
     let first_chunk = (range_start / chunk_size) as usize;
     let last_chunk = (range_end / chunk_size).min(chunk_count as u64 - 1) as usize;
 
     let mut decrypted_buffer = Vec::new();
 
-    // Lock the SvfFile for reading (we need exclusive access because read_chunk seeks)
     let mut svf = state.svf.lock().await;
 
     for chunk_idx in first_chunk..=last_chunk {
-        // Read the encrypted chunk from the .svf file
         let encrypted = svf.read_chunk(chunk_idx)?;
-
-        // Decrypt it
         let decrypted = decrypt_chunk(&state.key, nonce, chunk_idx as u64, &encrypted)?;
-
         decrypted_buffer.extend_from_slice(&decrypted);
     }
 
-    // Now slice out only the bytes that were actually requested.
-    // The decrypted_buffer contains full chunks starting from first_chunk.
-    // We need to trim the beginning and end to match the Range request.
     let buffer_start_offset = first_chunk as u64 * chunk_size;
     let slice_start = (range_start - buffer_start_offset) as usize;
     let slice_end = (range_end - buffer_start_offset + 1) as usize;
@@ -365,7 +350,6 @@ mod tests {
     fn test_parse_range_none() {
         let (start, end) = parse_range_header(&None, 1_000_000_000);
         assert_eq!(start, 0);
-        // Capped to MAX_RESPONSE_BYTES, not entire file
         assert!(end < 1_000_000_000);
         assert_eq!(end, MAX_RESPONSE_BYTES.min(1_000_000_000 - 1));
     }
@@ -375,7 +359,7 @@ mod tests {
         let (start, end) =
             parse_range_header(&Some("bytes=100-".to_string()), 1_000_000_000);
         assert_eq!(start, 100);
-        assert_eq!(end, 100 + MAX_RESPONSE_BYTES - 1); // capped
+        assert_eq!(end, 100 + MAX_RESPONSE_BYTES - 1);
     }
 
     #[test]
@@ -396,7 +380,6 @@ mod tests {
 
     #[test]
     fn test_parse_range_clamp() {
-        // Range extends past end of file — should be clamped
         let (start, end) =
             parse_range_header(&Some("bytes=900-2000".to_string()), 1000);
         assert_eq!(start, 900);

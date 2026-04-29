@@ -11,6 +11,14 @@
     "fs:allow-read-file",
     "fs:allow-exists",
     "shell:default",
-    "shell:allow-open"
+    "shell:allow-open",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://api.allentics.com/*" },
+        { "url": "http://localhost:8000/*" },
+        { "url": "http://127.0.0.1:8000/*" }
+      ]
+    }
   ]
 }

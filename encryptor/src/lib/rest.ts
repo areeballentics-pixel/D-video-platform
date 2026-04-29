@@ -9,12 +9,16 @@
 // pure boilerplate.
 
 import { invoke } from "@tauri-apps/api/core";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 interface ApiAuth {
   server_url: string;
   access_token: string | null;
 }
 
+// Routes through the Tauri HTTP plugin (Rust reqwest), which bypasses the
+// WebView's CSP / CORS — those would otherwise block calls from
+// https://tauri.localhost (the production WebView origin) to api.allentics.com.
 async function authedFetch(
   path: string,
   init: RequestInit = {},
@@ -30,7 +34,7 @@ async function authedFetch(
   if (init.body && !(init.body instanceof FormData)) {
     headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
   }
-  return fetch(`${auth.server_url}${path}`, { ...init, headers });
+  return tauriFetch(`${auth.server_url}${path}`, { ...init, headers });
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
