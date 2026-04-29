@@ -41,10 +41,13 @@ app = FastAPI(
 # origins (e.g. the live dashboard URL) come from the ALLOWED_ORIGINS env var
 # as a comma-separated list.
 _default_origins = [
+    # Tauri production builds on Windows (WebView2 custom protocol)
+    "https://tauri.localhost",
+    # Tauri production builds on macOS / Linux
+    "tauri://localhost",
     # Tauri player dev server (Vite default)
     "http://localhost:1420",
     "http://127.0.0.1:1420",
-    "tauri://localhost",
     # Tauri encryptor dev server — admin surface lives here in v1.5
     "http://localhost:1421",
     "http://127.0.0.1:1421",
