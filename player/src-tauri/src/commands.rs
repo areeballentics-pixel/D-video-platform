@@ -14,18 +14,21 @@ use tokio::sync::Mutex;
 use svf_core::{DeviceInfo, SecureKey, SvfFile, SvfInfo};
 
 use crate::errors::AppError;
-use crate::license::LicenseManager;
-use crate::player::{PlaybackInfo, VideoServer};
+use crate::license::{LicenseManager, RevalidationMonitor};
+use crate::player::{prepare_playback, PlaybackInfo, PlaybackSlot};
 use crate::security::SecurityMonitor;
 use crate::watermark::WatermarkRotator;
 
 /// Application-wide state, managed by Tauri.
 pub struct AppState {
-    pub active_server: Arc<Mutex<Option<VideoServer>>>,
+    /// Active playback served by the `stream` custom-protocol handler.
+    /// std Mutex because the protocol handler is synchronous.
+    pub active_playback: PlaybackSlot,
     pub library_path: Arc<Mutex<Option<String>>>,
     pub license_manager: Arc<Mutex<LicenseManager>>,
     pub security_monitor: Arc<Mutex<Option<SecurityMonitor>>>,
     pub watermark_rotator: Arc<Mutex<Option<WatermarkRotator>>>,
+    pub revalidation_monitor: Arc<Mutex<Option<RevalidationMonitor>>>,
 }
 
 /// License server URL, baked in at compile time via the `SVP_SERVER_URL`
@@ -42,11 +45,12 @@ const SERVER_URL: &str = match option_env!("SVP_SERVER_URL") {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            active_server: Arc::new(Mutex::new(None)),
+            active_playback: Arc::new(std::sync::Mutex::new(None)),
             library_path: Arc::new(Mutex::new(None)),
             license_manager: Arc::new(Mutex::new(LicenseManager::new(SERVER_URL))),
             security_monitor: Arc::new(Mutex::new(None)),
             watermark_rotator: Arc::new(Mutex::new(None)),
+            revalidation_monitor: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -268,14 +272,12 @@ pub async fn login_with_key(
 
 /// Logout and clear all tokens
 #[tauri::command]
-pub async fn logout(state: State<'_, AppState>) -> Result<(), AppError> {
+pub async fn logout(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
     // Stop any active playback first
-    {
-        let mut server = state.active_server.lock().await;
-        if let Some(mut s) = server.take() {
-            s.stop();
-        }
-    }
+    stop_all_playback_resources(&state, &app_handle).await;
 
     let mut lm = state.license_manager.lock().await;
     lm.logout().await?;
@@ -410,11 +412,24 @@ pub async fn start_playback(
     let rotator = WatermarkRotator::start(app_handle.clone(), user_email);
     *state.watermark_rotator.lock().await = Some(rotator);
 
-    // 5. Start the video server
-    let (server, info) = VideoServer::start(&svf_path, key).await?;
-    *state.active_server.lock().await = Some(server);
+    // 5. Prepare the decrypted-stream state for the `stream` custom protocol.
+    //    There is no HTTP server / port — playback is served over IPC inside
+    //    the webview, so the stream is not reachable from any browser.
+    let (playback, info) = prepare_playback(&svf_path, key)?;
+    *state.active_playback.lock().unwrap() = Some(playback);
 
-    log::info!("Playback started with security: {} at {}", info.title, info.url);
+    // 6. Start periodic online re-validation so a revoked/deleted video stops
+    //    in-progress playback (QA SP-009 / SP-014). Best-effort: it stays silent
+    //    while offline, preserving the documented 20-day offline grace.
+    let monitor = RevalidationMonitor::start(
+        app_handle.clone(),
+        state.license_manager.clone(),
+        info.video_id.clone(),
+        device.fingerprint.clone(),
+    );
+    *state.revalidation_monitor.lock().await = Some(monitor);
+
+    log::info!("Playback started with security: {} ({})", info.title, info.url);
     Ok(info)
 }
 
@@ -429,9 +444,13 @@ pub async fn stop_playback(
 
 /// Helper: stop all playback-related resources (server, security, watermark)
 async fn stop_all_playback_resources(state: &AppState, app_handle: &tauri::AppHandle) {
-    // Stop video server
-    if let Some(mut s) = state.active_server.lock().await.take() {
-        s.stop();
+    // Clear the active playback so the `stream` protocol returns 404 and the
+    // decrypted state is dropped (key zeroized).
+    *state.active_playback.lock().unwrap() = None;
+
+    // Stop the re-validation monitor
+    if let Some(monitor) = state.revalidation_monitor.lock().await.take() {
+        monitor.stop();
     }
 
     // Stop security monitor

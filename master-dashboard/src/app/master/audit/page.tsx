@@ -25,6 +25,9 @@ export default function MasterAuditPage() {
   const [tenantFilter, setTenantFilter] = useState("");
   const [days, setDays] = useState(30);
 
+  // AP-009: row id whose full details are expanded inline.
+  const [expanded, setExpanded] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -98,6 +101,7 @@ export default function MasterAuditPage() {
         </p>
       ) : (
         <div className="overflow-hidden rounded-xl border border-border">
+          <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead className="bg-bg-surface uppercase tracking-wider text-text-muted">
               <tr>
@@ -122,10 +126,16 @@ export default function MasterAuditPage() {
                   <td className="px-3 py-2 font-mono text-success">
                     {r.action}
                   </td>
-                  <td className="px-3 py-2 text-text-muted">
+                  <td
+                    className="px-3 py-2 text-text-muted"
+                    title={r.tenant_id ?? undefined}
+                  >
                     {r.tenant_id ? r.tenant_id.slice(0, 8) : "system"}
                   </td>
-                  <td className="px-3 py-2 text-text-muted">
+                  <td
+                    className="px-3 py-2 text-text-muted"
+                    title={r.target_id ?? undefined}
+                  >
                     {r.target_type
                       ? `${r.target_type}:${(r.target_id ?? "").slice(0, 8)}`
                       : "—"}
@@ -133,15 +143,36 @@ export default function MasterAuditPage() {
                   <td className="px-3 py-2 text-text-muted">
                     {r.ip_address ?? "—"}
                   </td>
-                  <td className="px-3 py-2 max-w-md truncate font-mono text-text-muted">
-                    {Object.keys(r.details).length > 0
-                      ? JSON.stringify(r.details)
-                      : "—"}
-                  </td>
+                  {/* AP-009: tooltip with full details + click to expand the
+                      complete payload inline (truncated otherwise). */}
+                  {Object.keys(r.details).length === 0 ? (
+                    <td className="px-3 py-2 max-w-md font-mono text-text-muted">
+                      —
+                    </td>
+                  ) : (
+                    <td
+                      className="px-3 py-2 max-w-md cursor-pointer font-mono text-text-muted"
+                      title={JSON.stringify(r.details)}
+                      onClick={() =>
+                        setExpanded((cur) => (cur === r.id ? null : r.id))
+                      }
+                    >
+                      {expanded === r.id ? (
+                        <pre className="whitespace-pre-wrap break-all text-text-primary">
+                          {JSON.stringify(r.details, null, 2)}
+                        </pre>
+                      ) : (
+                        <div className="truncate">
+                          {JSON.stringify(r.details)}
+                        </div>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

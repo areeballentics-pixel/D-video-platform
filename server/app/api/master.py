@@ -347,7 +347,8 @@ async def list_tenants(
 @router.post("/tenants", response_model=TenantCreateResponse, status_code=201)
 async def create_tenant(
     body: TenantCreateRequest,
-    _admin: PlatformAdmin = Depends(get_current_master_admin),
+    request: Request,
+    admin: PlatformAdmin = Depends(get_current_master_admin),
     session: AsyncSession = Depends(get_db),
 ):
     """Provision a new tenant with a first admin user.
@@ -387,6 +388,16 @@ async def create_tenant(
     session.add(admin_user)
     await session.commit()
 
+    # AP-003: tenant creation was not being audit-logged.
+    await write_audit(
+        session, tenant_id=tenant.id, actor_type="platform_admin",
+        actor_id=str(admin.id), actor_email=admin.email,
+        action="tenant.create", target_type="tenant", target_id=str(tenant.id),
+        details={"name": tenant.name, "slug": tenant.slug, "admin_email": admin_user.email},
+        request=request,
+    )
+    await session.commit()
+
     return TenantCreateResponse(
         tenant_id=str(tenant.id),
         tenant_name=tenant.name,
@@ -400,8 +411,9 @@ async def create_tenant(
 @router.patch("/tenants/{tenant_id}/suspend", response_model=TenantActionResponse)
 async def suspend_tenant(
     tenant_id: uuid.UUID,
+    request: Request,
     body: SuspendTenantRequest | None = None,
-    _admin: PlatformAdmin = Depends(get_current_master_admin),
+    admin: PlatformAdmin = Depends(get_current_master_admin),
     session: AsyncSession = Depends(get_db),
 ):
     """Suspend a tenant with an optional reason shown to the tenant admin
@@ -457,6 +469,16 @@ async def suspend_tenant(
         if cursor == 0 or cursor == "0":
             break
 
+    # AP-003: tenant suspension was not being audit-logged.
+    await write_audit(
+        session, tenant_id=tenant.id, actor_type="platform_admin",
+        actor_id=str(admin.id), actor_email=admin.email,
+        action="tenant.suspend", target_type="tenant", target_id=str(tenant.id),
+        details={"reason": tenant.suspension_reason, "sessions_revoked": revoked},
+        request=request,
+    )
+    await session.commit()
+
     return TenantActionResponse(
         tenant_id=str(tenant.id),
         is_active=False,
@@ -467,7 +489,8 @@ async def suspend_tenant(
 @router.patch("/tenants/{tenant_id}/reactivate", response_model=TenantActionResponse)
 async def reactivate_tenant(
     tenant_id: uuid.UUID,
-    _admin: PlatformAdmin = Depends(get_current_master_admin),
+    request: Request,
+    admin: PlatformAdmin = Depends(get_current_master_admin),
     session: AsyncSession = Depends(get_db),
 ):
     """Reverse a suspension. Existing users will need to log in again."""
@@ -486,6 +509,16 @@ async def reactivate_tenant(
     tenant.is_active = True
     tenant.suspended_at = None
     await session.commit()
+
+    # AP-003: tenant reactivation was not being audit-logged.
+    await write_audit(
+        session, tenant_id=tenant.id, actor_type="platform_admin",
+        actor_id=str(admin.id), actor_email=admin.email,
+        action="tenant.reactivate", target_type="tenant", target_id=str(tenant.id),
+        request=request,
+    )
+    await session.commit()
+
     return TenantActionResponse(
         tenant_id=str(tenant.id),
         is_active=True,
@@ -497,7 +530,8 @@ async def reactivate_tenant(
 async def delete_tenant(
     tenant_id: uuid.UUID,
     confirm_slug: str,
-    _admin: PlatformAdmin = Depends(get_current_master_admin),
+    request: Request,
+    admin: PlatformAdmin = Depends(get_current_master_admin),
     session: AsyncSession = Depends(get_db),
 ):
     """Hard-delete a tenant (cascade).
@@ -531,6 +565,12 @@ async def delete_tenant(
     from app.models.encryptor_device import EncryptorDevice
     from app.models.enrollment import Enrollment
     from app.models.piracy_report import PiracyReport
+    from app.models.watch_event import WatchEvent
+
+    # watch_events has no ON DELETE CASCADE on tenant/user/video, so a tenant
+    # with any watch history would 500 on a FK violation — purge it first.
+    # (watch_aggregates DO cascade on user/video delete, so they need no purge.)
+    await session.execute(sa_delete(WatchEvent).where(WatchEvent.tenant_id == tenant.id))
 
     # Collect user IDs for this tenant
     user_ids_result = await session.execute(
@@ -561,6 +601,17 @@ async def delete_tenant(
 
     await session.execute(sa_delete(Video).where(Video.tenant_id == tenant.id))
     await session.execute(sa_delete(Tenant).where(Tenant.id == tenant.id))
+    await session.commit()
+
+    # AP-003: tenant deletion (irreversible cascade) was not being audit-logged.
+    # tenant_id is None because the row no longer exists; the deleted tenant is
+    # recorded via target_id + details so the trail survives the cascade.
+    await write_audit(
+        session, tenant_id=None, actor_type="platform_admin",
+        actor_id=str(admin.id), actor_email=admin.email,
+        action="tenant.delete", target_type="tenant", target_id=str(tenant_id),
+        details={"slug": confirm_slug, "name": tenant.name}, request=request,
+    )
     await session.commit()
 
     return TenantActionResponse(
@@ -1216,13 +1267,15 @@ async def impersonate_tenant_admin(
             status_code=404, detail="Tenant has no active admin users to impersonate"
         )
 
-    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=15)
     from jose import jwt as _jwt
     token = _jwt.encode(
         {
             "sub": str(target_admin.id),
             "tenant_id": str(target_admin.tenant_id),
             "role": target_admin.role,
+            "iat": now,
             "exp": expire,
             "type": "access",
             "impersonator_admin_id": str(admin.id),

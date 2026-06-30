@@ -36,6 +36,23 @@ export async function stopPlayback(): Promise<void> {
   return invoke("stop_playback");
 }
 
+/** SP-012: report a watch heartbeat so analytics (views / watch time) update. */
+export async function reportWatchHeartbeat(
+  videoId: string,
+  positionMs: number,
+  watchedDeltaMs: number,
+  courseId?: string,
+): Promise<void> {
+  return invoke("report_watch_heartbeat", {
+    input: {
+      video_id: videoId,
+      position_ms: positionMs,
+      watched_delta_ms: watchedDeltaMs,
+      course_id: courseId ?? null,
+    },
+  });
+}
+
 export async function getDeviceInfo(): Promise<DeviceInfo> {
   return invoke("get_device_info");
 }

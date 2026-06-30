@@ -1,6 +1,8 @@
 """Request/response schemas for the Master (platform-admin) API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.utils.validation import is_valid_email
 
 
 # ─── Auth ───
@@ -31,10 +33,20 @@ class MasterRefreshRequest(BaseModel):
 # ─── Tenants ───
 
 class TenantCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
+    name: str = Field(..., min_length=2, max_length=255)  # AP-011: reject 1-char names
     slug: str = Field(..., min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9-]*$")
     admin_email: str
     admin_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("admin_email")
+    @classmethod
+    def _validate_admin_email(cls, v: str) -> str:
+        # AP-001: the field was a bare `str` with no validation, so `abc@g`
+        # and `123@q` were accepted. Reject structurally-invalid addresses.
+        v = (v or "").strip()
+        if not is_valid_email(v):
+            raise ValueError("admin_email must be a valid email address")
+        return v
 
 
 class TenantCreateResponse(BaseModel):

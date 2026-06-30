@@ -19,7 +19,7 @@ pub struct WatermarkData {
     pub x: f64,
     /// Y position as fraction 0.0 - 1.0 (from top edge)
     pub y: f64,
-    /// Opacity (0.04 - 0.12 — barely visible but catches in recordings)
+    /// Opacity (0.16 - 0.26 — visible enough to deter + survive camera capture)
     pub opacity: f64,
     /// Rotation in degrees (-15 to +15)
     pub rotation: f64,
@@ -36,7 +36,9 @@ fn generate_watermark(user_email: &str) -> WatermarkData {
         // Keep within safe margins (10%-80%) so text doesn't get cut off
         x: rng.gen_range(0.10..0.70),
         y: rng.gen_range(0.10..0.80),
-        opacity: rng.gen_range(0.03..0.07),
+        // QA SP-011: 0.03-0.07 was effectively invisible (compounded by the
+        // overlay's color alpha). Raise to a forensically visible band.
+        opacity: rng.gen_range(0.16..0.26),
         rotation: rng.gen_range(-12.0..12.0),
     }
 }

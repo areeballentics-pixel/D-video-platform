@@ -36,6 +36,13 @@ class User(Base):
     # Free-form admin-only notes ("paid late, extend by 1mo"). Never shown to students.
     admin_notes: Mapped[str | None] = mapped_column(String(5000), nullable=True)
 
+    # Bumped to "now" on password reset / forced logout. Access tokens carry an
+    # `iat`; get_current_user rejects any token issued before this instant, so a
+    # password change immediately ends every existing session (QA SP-001).
+    tokens_valid_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

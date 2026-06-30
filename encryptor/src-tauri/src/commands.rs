@@ -251,6 +251,12 @@ pub async fn start_encryption_job(
     let tenant_id = Uuid::parse_str(&tenant_id_str)
         .map_err(|_| AppError::Validation("tenant_id is not a UUID".into()))?;
 
+    // ── Hard gate: reject non-video / corrupted inputs BEFORE spawning a job ──
+    // (ENC-003/ENC-004) A .txt renamed .mp4 or a hex-corrupted MP4 must never
+    // reach the encryption pipeline. This returns synchronously, so the error
+    // surfaces in JobsPage's `handleStart` catch as a clean message.
+    mp4_probe::validate_video_file(&input.input_path)?;
+
     // ── Probe metadata for auto-quality + dimensions ──
     let meta = mp4_probe::probe(&input.input_path).unwrap_or_else(|_| {
         mp4_probe::VideoMeta::unknown()

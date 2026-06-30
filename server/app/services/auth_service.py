@@ -79,21 +79,25 @@ async def register_device_on_login(
 
     Returns the Device (existing or new).
     """
-    # 1. Check for existing device with same fingerprint
+    now = datetime.now(timezone.utc)
+
+    # 1. Look up an existing device with this fingerprint — ACTIVE OR INACTIVE.
+    #    A previously-deregistered device must be REUSED (reactivated) on
+    #    re-login, not re-inserted: the (user_id, fingerprint) unique constraint
+    #    would otherwise raise IntegrityError and 500 the login, permanently
+    #    bricking that machine for the user (QA SP-015).
     result = await session.execute(
         select(Device).where(
             Device.user_id == user.id,
             Device.fingerprint == fingerprint,
-            Device.is_active == True,  # noqa: E712
         )
     )
     existing = result.scalar_one_or_none()
-    if existing is not None:
-        existing.last_seen_at = datetime.now(timezone.utc)
+
+    if existing is not None and existing.is_active:
+        existing.last_seen_at = now
         # Refresh human-readable metadata on every login so a hostname
         # change (e.g. student renamed their PC) shows up in the admin UI.
-        # Also fills in blanks for devices registered before the player
-        # started sending these fields.
         if hostname and hostname != existing.hostname:
             existing.hostname = hostname
         if os_version and os_version != existing.os_version:
@@ -101,7 +105,17 @@ async def register_device_on_login(
         await session.flush()
         return existing
 
-    # Count active devices
+    def _reactivate(device: Device) -> None:
+        """Reuse a deregistered row instead of inserting a duplicate."""
+        device.is_active = True
+        device.registered_at = now
+        device.last_seen_at = now
+        if hostname:
+            device.hostname = hostname
+        if os_version:
+            device.os_version = os_version
+
+    # Count active devices (an inactive `existing` row does NOT count).
     count_result = await session.execute(
         select(func.count()).select_from(Device).where(
             Device.user_id == user.id, Device.is_active == True  # noqa: E712
@@ -109,8 +123,17 @@ async def register_device_on_login(
     )
     active_count = count_result.scalar_one()
 
-    # 2. Under the limit — just register
+    # 2. Under the limit — register (reuse the inactive row if one exists).
     if active_count < user.max_devices:
+        if existing is not None:
+            _reactivate(existing)
+            await session.flush()
+            session.add(DeviceChange(
+                user_id=user.id, old_device_id=None, new_device_id=existing.id,
+            ))
+            await session.flush()
+            return existing
+
         new_device = Device(
             user_id=user.id,
             fingerprint=fingerprint,
@@ -119,18 +142,14 @@ async def register_device_on_login(
         )
         session.add(new_device)
         await session.flush()
-
-        # Record the change
         session.add(DeviceChange(
-            user_id=user.id,
-            old_device_id=None,
-            new_device_id=new_device.id,
+            user_id=user.id, old_device_id=None, new_device_id=new_device.id,
         ))
         await session.flush()
         return new_device
 
-    # 3. At the limit — check cooldown
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    # 3. At the limit — check the 30-day device-change cooldown.
+    thirty_days_ago = now - timedelta(days=30)
     changes_result = await session.execute(
         select(func.count()).select_from(DeviceChange).where(
             DeviceChange.user_id == user.id,
@@ -145,7 +164,7 @@ async def register_device_on_login(
             f"per 30 days). Please try again later."
         )
 
-    # Deactivate the oldest active device
+    # Deactivate the oldest active device to free a slot.
     oldest_result = await session.execute(
         select(Device)
         .where(Device.user_id == user.id, Device.is_active == True)  # noqa: E712
@@ -155,7 +174,16 @@ async def register_device_on_login(
     oldest_device = oldest_result.scalar_one()
     oldest_device.is_active = False
 
-    # Register new device
+    # Register the new device (reuse the inactive row if one exists).
+    if existing is not None:
+        _reactivate(existing)
+        await session.flush()
+        session.add(DeviceChange(
+            user_id=user.id, old_device_id=oldest_device.id, new_device_id=existing.id,
+        ))
+        await session.flush()
+        return existing
+
     new_device = Device(
         user_id=user.id,
         fingerprint=fingerprint,
@@ -164,12 +192,8 @@ async def register_device_on_login(
     )
     session.add(new_device)
     await session.flush()
-
-    # Record the change
     session.add(DeviceChange(
-        user_id=user.id,
-        old_device_id=oldest_device.id,
-        new_device_id=new_device.id,
+        user_id=user.id, old_device_id=oldest_device.id, new_device_id=new_device.id,
     ))
     await session.flush()
     return new_device
@@ -217,6 +241,28 @@ async def create_tokens(user: User, session: AsyncSession) -> dict:
         "tenant_id": str(user.tenant_id),
         "licensed_video_keys": licensed_video_keys,
     }
+
+
+async def revoke_user_refresh_tokens(user_id) -> int:
+    """Delete every refresh:{jti} Redis entry belonging to this user.
+
+    Used by logout and by admin password reset (QA SP-001) so a still-valid
+    refresh token can't keep minting fresh access tokens after the session
+    should have ended.
+    """
+    redis = get_redis()
+    user_id_str = str(user_id)
+    deleted = 0
+    cursor = "0"
+    while True:
+        cursor, keys = await redis.scan(cursor=cursor, match="refresh:*", count=200)
+        for key in keys:
+            if await redis.get(key) == user_id_str:
+                await redis.delete(key)
+                deleted += 1
+        if cursor == 0 or cursor == "0":
+            break
+    return deleted
 
 
 class DeviceLimitExceeded(Exception):

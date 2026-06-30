@@ -130,6 +130,22 @@ export default function TenantsPage() {
     load();
   }, [load]);
 
+  // AP-007: Escape closes whichever modal/drawer is currently open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setShowCreate(false);
+      setJustCreated(null);
+      setSeatsTarget(null);
+      setDeleteTarget(null);
+      setSuspendTarget(null);
+      setImpersonationToken(null);
+      setEncryptorsTarget(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // Derived stats for the header tiles
   const totalTenants = tenants.length;
   const activeTenants = tenants.filter((t) => t.is_active).length;
@@ -288,7 +304,10 @@ export default function TenantsPage() {
           </p>
         </div>
         <button
-          onClick={() => setShowCreate(true)}
+          onClick={() => {
+            setError("");
+            setShowCreate(true);
+          }}
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-hover"
         >
           <svg
@@ -366,6 +385,7 @@ export default function TenantsPage() {
       {/* Tenants table */}
       {!loading && tenants.length > 0 && (
         <div className="overflow-hidden rounded-xl border border-border bg-bg-surface">
+          <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-border">
@@ -554,6 +574,7 @@ export default function TenantsPage() {
               })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -586,6 +607,14 @@ export default function TenantsPage() {
               </button>
             </div>
 
+            {/* AP-005: surface create errors (e.g. duplicate slug 409) inside
+                the modal so they aren't hidden behind this z-50 overlay. */}
+            {error && (
+              <div className="mb-4 rounded-lg border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
+                {error}
+              </div>
+            )}
+
             <form onSubmit={handleCreate} className="space-y-4">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-text-muted">
@@ -615,7 +644,6 @@ export default function TenantsPage() {
                     )
                   }
                   placeholder="acme-academy"
-                  pattern="^[a-z0-9][a-z0-9-]*$"
                   className="w-full rounded-lg border border-border bg-bg-primary px-4 py-2.5 text-sm text-text-primary placeholder-text-muted/50 outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary"
                 />
                 <p className="mt-1 text-xs text-text-muted/70">

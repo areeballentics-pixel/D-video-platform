@@ -24,6 +24,7 @@ from app.services.auth_service import (
     authenticate_user,
     create_tokens,
     register_device_on_login,
+    revoke_user_refresh_tokens,
 )
 
 router = APIRouter()
@@ -159,21 +160,5 @@ async def logout(user: User = Depends(get_current_user)):
     but the refresh token stored in Redis is removed so no new access tokens
     can be minted.
     """
-    redis = get_redis()
-    # We scan for keys matching refresh:* that map to this user_id and delete them.
-    # This is a simple approach; for high-scale production you would track JTIs per user.
-    cursor = None
-    user_id_str = str(user.id)
-    deleted = 0
-    cursor = "0"
-    while True:
-        cursor, keys = await redis.scan(cursor=cursor, match="refresh:*", count=100)
-        for key in keys:
-            value = await redis.get(key)
-            if value == user_id_str:
-                await redis.delete(key)
-                deleted += 1
-        if cursor == 0 or cursor == "0":
-            break
-
+    deleted = await revoke_user_refresh_tokens(user.id)
     return {"message": "Logged out", "tokens_revoked": deleted}

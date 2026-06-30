@@ -11,6 +11,7 @@ export interface SvfInfo {
 /** Playback info returned when starting video (matches Rust's PlaybackInfo) */
 export interface PlaybackInfo {
   url: string;
+  video_id: string;
   title: string;
   duration_ms: number;
   width: number;

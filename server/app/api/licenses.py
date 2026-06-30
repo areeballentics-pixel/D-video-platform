@@ -37,6 +37,14 @@ async def validate_license_endpoint(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(e),
         )
+    except VideoNotFound as e:
+        # Deleted/unknown video → no longer licensed, so the player's live
+        # re-check stops in-progress playback (QA SP-014).
+        return LicenseValidateResponse(
+            valid=False,
+            message=str(e),
+            offline_grace_days=0,
+        )
     except LicenseInvalid as e:
         return LicenseValidateResponse(
             valid=False,

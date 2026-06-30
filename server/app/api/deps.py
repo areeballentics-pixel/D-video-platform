@@ -69,6 +69,20 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Session invalidation (QA SP-001): a password reset / forced logout sets
+    # User.tokens_valid_from. Reject any access token whose issued-at (iat)
+    # predates that instant, so a password change ends every existing session.
+    if user.tokens_valid_from is not None:
+        iat = payload.get("iat")
+        # Compare whole seconds: JWT `iat` is floored to seconds, so a fresh
+        # login in the same second as the reset must still be accepted.
+        if iat is None or iat < int(user.tokens_valid_from.timestamp()):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session ended. Please log in again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     # Enforce tenant-level suspension. If a platform admin has suspended
     # this user's tenant, cut off all API access immediately. The
     # player's offline cache still works up to the grace period — that

@@ -17,18 +17,22 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from jose import jwt
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete as sa_delete, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.config import settings
 from app.core.security import hash_password, verify_password
 from app.database import get_db
+from app.models.course import Course
 from app.models.device import Device
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.video import VIDEO_STATUS_LIVE, VIDEO_STATUS_PENDING_URLS, Video
+from app.models.watch_event import WatchEvent
 from app.services.audit_service import write_audit
+from app.services.auth_service import revoke_user_refresh_tokens
+from app.utils.validation import is_valid_email
 
 router = APIRouter()
 
@@ -79,11 +83,25 @@ async def list_videos(
 @router.delete("/videos/{video_id}")
 async def delete_video(
     video_id: str,
+    request: Request,
     user: User = Depends(require_admin),
     session: AsyncSession = Depends(get_db),
 ):
-    """Delete a video and its .svf files."""
-    vid = uuid.UUID(video_id)
+    """Delete a video.
+
+    Note (v1 pivot): the server no longer stores .svf bytes — institutes host
+    them on their own Drive — so there is nothing to unlink on disk. The old
+    code referenced an undefined `ENCRYPTED_DIR` and raised NameError → 500
+    (QA SP-003 / SP-014). We delete the DB row plus the dependent rows that
+    don't cascade at the FK level: watch_events has no ON DELETE CASCADE, and a
+    course intro pointer must be nulled. course_videos and watch_aggregates
+    cascade automatically.
+    """
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid video_id")
+
     result = await session.execute(
         select(Video).where(Video.id == vid, Video.tenant_id == user.tenant_id)
     )
@@ -91,13 +109,24 @@ async def delete_video(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # Delete .svf files
-    for quality in (video.qualities or []):
-        svf_path = ENCRYPTED_DIR / f"{video_id}_{quality}.svf"
-        svf_path.unlink(missing_ok=True)
+    title = video.title
+    qualities = list(video.qualities or [])
 
+    # Remove dependent rows lacking ON DELETE CASCADE on videos.id.
+    await session.execute(sa_delete(WatchEvent).where(WatchEvent.video_id == vid))
+    await session.execute(
+        sa_update(Course).where(Course.intro_video_id == vid).values(intro_video_id=None)
+    )
     await session.delete(video)
-    await session.flush()
+    await session.commit()
+
+    await write_audit(
+        session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+        actor_id=str(user.id), actor_email=user.email,
+        action="video.delete", target_type="video", target_id=video_id,
+        details={"title": title, "qualities": qualities}, request=request,
+    )
+    await session.commit()
 
     return {"message": "Video deleted", "video_id": video_id}
 
@@ -150,6 +179,11 @@ async def create_student(
     session: AsyncSession = Depends(get_db),
 ):
     """Create a new student account."""
+    # Validate email format (AP-001 — same gate as tenant admin emails).
+    email = (email or "").strip()
+    if not is_valid_email(email):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+
     # Check email uniqueness within tenant
     existing = await session.execute(
         select(User).where(User.tenant_id == user.tenant_id, User.email == email)
@@ -247,6 +281,67 @@ async def force_deregister_device(
     await session.flush()
 
     return {"message": "Device force-deregistered", "device_id": device_id}
+
+
+@router.post("/students/{student_id}/devices/{device_id}/reactivate")
+async def reactivate_student_device(
+    student_id: str,
+    device_id: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_db),
+):
+    """Re-enable a previously deregistered device, subject to the student's
+    device limit. Gives admins an explicit recovery path (QA SP-015) on top of
+    the auto-reactivation that now also happens on the student's next login."""
+    try:
+        sid = uuid.UUID(student_id)
+        dev = uuid.UUID(device_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid, User.tenant_id == user.tenant_id, User.role == "student",
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    device = (await session.execute(
+        select(Device).where(Device.id == dev, Device.user_id == sid)
+    )).scalar_one_or_none()
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if not device.is_active:
+        active_count = await session.scalar(
+            select(func.count()).select_from(Device).where(
+                Device.user_id == sid, Device.is_active.is_(True)
+            )
+        ) or 0
+        if active_count >= student.max_devices:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Device limit reached ({active_count}/{student.max_devices}). "
+                    f"Deregister another device first."
+                ),
+            )
+        device.is_active = True
+        device.last_seen_at = datetime.now(timezone.utc)
+        await session.commit()
+
+        await write_audit(
+            session, tenant_id=user.tenant_id, actor_type="tenant_admin",
+            actor_id=str(user.id), actor_email=user.email,
+            action="student.reactivate_device",
+            target_type="device", target_id=device_id,
+            request=request,
+        )
+        await session.commit()
+
+    return {"message": "Device reactivated", "device_id": device_id, "is_active": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -570,13 +665,21 @@ async def reset_student_password(
     student.password_hash = hash_password(body.new_password)
     student.failed_login_attempts = 0
     student.locked_until = None
+    # QA SP-001: end every existing session for this student. Bumping
+    # tokens_valid_from invalidates already-issued access tokens (they carry an
+    # earlier `iat`), and purging the Redis refresh tokens stops new ones from
+    # being minted. The student must log in again with the new password.
+    student.tokens_valid_from = datetime.now(timezone.utc)
     await session.commit()
+
+    revoked = await revoke_user_refresh_tokens(student.id)
 
     await write_audit(
         session, tenant_id=user.tenant_id, actor_type="tenant_admin",
         actor_id=str(user.id), actor_email=user.email,
         action="student.reset_password",
         target_type="user", target_id=str(student.id),
+        details={"sessions_revoked": revoked},
         request=request,
     )
     await session.commit()
@@ -585,6 +688,7 @@ async def reset_student_password(
         "message": "Password reset",
         "user_id": str(student.id),
         "email": student.email,
+        "sessions_ended": True,
     }
 
 
@@ -703,12 +807,14 @@ async def login_as_student(
     if student is None:
         raise HTTPException(status_code=404, detail="Active student not found")
 
-    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=15)
     token = jwt.encode(
         {
             "sub": str(student.id),
             "tenant_id": str(student.tenant_id),
             "role": student.role,
+            "iat": now,
             "exp": expire,
             "type": "access",
             "impersonator_id": str(user.id),

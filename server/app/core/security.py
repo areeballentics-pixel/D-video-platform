@@ -25,11 +25,15 @@ def verify_password(plain: str, hashed: str) -> bool:
 # ─── JWT Tokens ───
 
 def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": user_id,
         "tenant_id": tenant_id,
         "role": role,
+        # `iat` lets get_current_user reject tokens minted before a password
+        # reset (compared against User.tokens_valid_from). QA SP-001.
+        "iat": now,
         "exp": expire,
         "type": "access",
     }

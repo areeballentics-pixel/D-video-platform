@@ -1015,3 +1015,90 @@ impl LicenseManager {
         Ok(())
     }
 }
+
+// ─── Live access re-validation during playback (QA SP-009 / SP-014) ───
+//
+// Access is normally only checked at playback start. This background monitor
+// re-validates the license against the server every couple of minutes WHILE a
+// video plays, and tells the frontend to stop if access was revoked or the
+// video deleted. When the device is offline it stays silent — the documented
+// 20-day offline grace still applies, so legitimate offline users aren't cut off.
+
+/// Handle for the background re-validation task; dropping it stops the task.
+pub struct RevalidationMonitor {
+    stop_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl RevalidationMonitor {
+    pub fn start(
+        app_handle: tauri::AppHandle,
+        license_manager: std::sync::Arc<tokio::sync::Mutex<LicenseManager>>,
+        video_id: String,
+        fingerprint: String,
+    ) -> Self {
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            use tauri::Emitter;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+            interval.tick().await; // consume the immediate first tick
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let result = {
+                            let mut lm = license_manager.lock().await;
+                            lm.validate_license(&video_id, &fingerprint).await
+                        };
+                        match result {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = app_handle.emit(
+                                    "access-revoked",
+                                    "Your access to this video has been revoked.".to_string(),
+                                );
+                                break;
+                            }
+                            Err(AppError::License(msg)) => {
+                                // Stop only on genuine access loss. Deliberately do
+                                // NOT match "expired": a 401 yields "Session expired"
+                                // because the 2h access token lapsed (there is no
+                                // refresh path) — that must NOT stop playback within
+                                // the offline grace. Real revocation/deletion arrives
+                                // as Ok(false) above, or as 403 "Access denied …
+                                // revoked" (caught by denied/revoke).
+                                let m = msg.to_lowercase();
+                                if m.contains("revoke")
+                                    || m.contains("denied")
+                                    || m.contains("suspend")
+                                {
+                                    let _ = app_handle.emit("access-revoked", msg);
+                                    break;
+                                }
+                            }
+                            Err(_) => { /* offline / transient — rely on offline grace */ }
+                        }
+                    }
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            log::info!("Revalidation monitor stopped");
+        });
+
+        RevalidationMonitor { stop_tx }
+    }
+
+    pub fn stop(&self) {
+        let _ = self.stop_tx.send(true);
+    }
+}
+
+impl Drop for RevalidationMonitor {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}

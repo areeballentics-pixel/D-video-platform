@@ -82,6 +82,50 @@ pub struct ApiClient {
 }
 
 
+/// Turn a non-success HTTP response into a clean, user-facing message.
+///
+/// ENC-001: never leak reqwest's raw `<code> <reason>` status line (e.g.
+/// "429 Too Many Requests") into the UI. We prefer FastAPI's JSON `detail`
+/// field (a human-friendly string), and otherwise fall back to a short
+/// message keyed off the status class.
+async fn friendly_http_error(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    // FastAPI returns {"detail": "..."} for handled errors. `detail` may also
+    // be an array (request-validation errors); only surface a plain string.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(detail) = json.get("detail").and_then(|v| v.as_str()) {
+            let detail = detail.trim();
+            if !detail.is_empty() {
+                return detail.to_string();
+            }
+        }
+    }
+
+    // No usable detail — friendly fallback by status class. We deliberately do
+    // not include `status` (its Display renders the raw reason phrase).
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => {
+            "Too many requests right now — you may have hit a rate limit or seat cap. Please wait a moment and try again.".to_string()
+        }
+        StatusCode::UNAUTHORIZED => {
+            "Not authorized — please log in again.".to_string()
+        }
+        StatusCode::FORBIDDEN => {
+            "You don't have permission to perform this action.".to_string()
+        }
+        StatusCode::NOT_FOUND => {
+            "The requested resource was not found.".to_string()
+        }
+        s if s.is_server_error() => {
+            "The server ran into a problem. Please try again shortly.".to_string()
+        }
+        _ => "The request could not be completed. Please try again.".to_string(),
+    }
+}
+
+
 impl ApiClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self, AppError> {
         let http = Client::builder()
@@ -153,12 +197,7 @@ impl ApiClient {
         });
         let resp = self.http.post(&url).json(&body).send().await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Auth(format!(
-                "login failed ({}): {}",
-                status, text
-            )));
+            return Err(AppError::Auth(friendly_http_error(resp).await));
         }
         let parsed: LoginResponse = resp.json().await?;
         self.set_tokens(parsed.access_token.clone(), parsed.refresh_token.clone())
@@ -225,8 +264,7 @@ impl ApiClient {
                 continue;
             }
             if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(AppError::Api(format!("{} → {}: {}", path, status, text)));
+                return Err(AppError::Api(friendly_http_error(resp).await));
             }
             return resp.json::<T>().await.map_err(AppError::from);
         }
@@ -314,8 +352,7 @@ impl ApiClient {
                 continue;
             }
             if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(AppError::Api(format!("PUT urls → {}: {}", status, text)));
+                return Err(AppError::Api(friendly_http_error(resp).await));
             }
             return resp.json().await.map_err(AppError::from);
         }

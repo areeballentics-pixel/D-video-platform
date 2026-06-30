@@ -30,13 +30,25 @@ pub mod watermark;
 /// that makes this work on mobile too (not relevant for us, but good practice).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let app_state = commands::AppState::new();
+    // Clone the playback slot for the custom-protocol handler — same Arc as the
+    // managed AppState, so start_playback / stop_playback are visible to the
+    // stream handler.
+    let playback_slot = app_state.active_playback.clone();
+
     tauri::Builder::default()
         // ─── Tauri plugins ───
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        // ─── `stream` custom protocol: serves decrypted video ranges over IPC,
+        //     with NO TCP socket / port. Fixes QA SP-006/007/010/013 (the old
+        //     localhost http://127.0.0.1:<port>/video.mp4?token= URL is gone).
+        .register_uri_scheme_protocol("stream", move |_ctx, request| {
+            crate::player::serve_stream(&playback_slot, &request)
+        })
         // ─── App-wide state (accessible via State<'_, AppState> in commands) ───
-        .manage(commands::AppState::new())
+        .manage(app_state)
         // ─── IPC command handlers (callable from React via invoke()) ───
         .invoke_handler(tauri::generate_handler![
             commands::get_device_info,

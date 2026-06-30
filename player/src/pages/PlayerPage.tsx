@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { startPlayback, stopPlayback } from "../lib/tauri";
+import { startPlayback, stopPlayback, reportWatchHeartbeat } from "../lib/tauri";
+import { listen } from "@tauri-apps/api/event";
 import type { PlaybackInfo } from "../lib/types";
 import WatermarkOverlay from "../components/WatermarkOverlay";
 import SecurityWarning from "../components/SecurityWarning";
@@ -83,6 +84,37 @@ export default function PlayerPage() {
       video.removeEventListener("pause", onPause);
     };
   }, [playbackInfo]);
+
+  // SP-012: report watch heartbeats so analytics (views / watch time) update.
+  // The Rust command existed but nothing in the frontend ever called it.
+  useEffect(() => {
+    const videoId = playbackInfo?.video_id;
+    if (!videoId) return;
+    let lastPosMs = 0;
+    const id = window.setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.paused) return;
+      const posMs = Math.floor(video.currentTime * 1000);
+      const deltaMs = Math.max(0, Math.min(posMs - lastPosMs, 30000));
+      lastPosMs = posMs;
+      reportWatchHeartbeat(videoId, posMs, deltaMs).catch(() => {});
+    }, 20000);
+    return () => window.clearInterval(id);
+  }, [playbackInfo]);
+
+  // SP-009 / SP-014: the backend re-validates access during playback and emits
+  // "access-revoked" if the enrollment was revoked or the video deleted.
+  useEffect(() => {
+    const un = listen<string>("access-revoked", (event) => {
+      const video = videoRef.current;
+      if (video) video.pause();
+      stopPlayback().catch(() => {});
+      setError(event.payload || "Your access to this video has been revoked.");
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   function handlePlayPause() {
     const video = videoRef.current;
@@ -183,6 +215,11 @@ export default function PlayerPage() {
             className="max-h-full max-w-full"
             autoPlay
             onClick={handlePlayPause}
+            onError={() =>
+              setError(
+                "This video could not be played. The file may be corrupted or not a supported video.",
+              )
+            }
           />
         )}
 

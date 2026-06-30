@@ -1,49 +1,47 @@
-// player.rs — Video playback via embedded local HTTP server
+// player.rs — Video playback via a Tauri custom URI scheme protocol (`stream`)
 //
-// When a user clicks "play" on an .svf file:
+// PREVIOUS DESIGN (removed): a localhost HTTP server bound to
+// 127.0.0.1:<random-port>/video.mp4?token=<uuid> streamed the decrypted bytes,
+// and the <video> element pointed at it. Because that URL lived in the
+// webview's DOM and was a real TCP endpoint, it could be copied (right-click →
+// "copy video address") and opened in any external browser — concurrently,
+// across browser restarts, for as long as the player ran (QA SP-006/007/010/013).
 //
-// 1. We parse the .svf file and derive the decryption key
-// 2. We spawn a tiny HTTP server on 127.0.0.1 with a random port
-// 3. We give the React frontend a URL: http://127.0.0.1:{port}/video.mp4?token={uuid}
-// 4. The <video> element sends HTTP Range requests to this URL
-// 5. For each Range request, we:
-//    a. Figure out which encrypted chunks cover the requested byte range
-//    b. Decrypt those chunks on-the-fly (in memory, never on disk)
-//    c. Slice out the exact bytes requested
-//    d. Return them with proper 206 Partial Content headers
-// 6. When playback stops, we shut down the server and zero the key
-//
-// IMPORTANT: this only works because tauri.conf.json sets
-// `app.windows[].useHttpsScheme = false` (default in v1.5). With the default
-// HTTPS scheme the page loads from `https://tauri.localhost`, and Chromium's
-// mixed-content auto-upgrade silently blocks `http://127.0.0.1:*` <video>
-// URLs — leaving a black screen at 0:00 with no JS error.
+// CURRENT DESIGN: we register a Tauri custom URI scheme ("stream") and serve the
+// decrypted byte ranges from it. Custom schemes are handled INSIDE the webview
+// process over IPC — there is NO TCP socket and NO port, so there is no URL an
+// external browser can resolve. The <video src> is:
+//   - Windows / Android (useHttpsScheme=false): http://stream.localhost/video.mp4
+//   - macOS / Linux:                            stream://localhost/video.mp4
 //
 // Security:
-// - Server binds to 127.0.0.1 only (not 0.0.0.0)
-// - Random ephemeral port (not predictable)
-// - One-time UUID token per playback session
-// - Decrypted bytes only exist in memory momentarily
+// - No network-reachable endpoint exists at all (stronger than localhost-bind).
+// - Decrypted bytes only exist in memory momentarily, per Range request.
+// - The active playback is cleared on stop / navigation / logout, so the scheme
+//   returns 404 once playback ends.
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tokio::sync::{oneshot, Mutex};
-use uuid::Uuid;
-use warp::{Filter, Reply};
+use tauri::http::{Request, Response, StatusCode};
 
 use svf_core::{decrypt_chunk, SecureKey, SvfFile};
 
 use crate::errors::AppError;
 
-/// Info returned to the React frontend when playback starts
+/// The custom scheme name. Keep in sync with the CSP `media-src` in
+/// tauri.conf.json and with `stream_url()` below.
+pub const STREAM_SCHEME: &str = "stream";
+
+/// Info returned to the React frontend when playback starts.
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaybackInfo {
-    /// URL to set as the <video> element's src
+    /// URL to set as the <video> element's src (custom-scheme, not http TCP).
     pub url: String,
-    /// Video metadata for the UI
+    /// Canonical UUID of the video (from the .svf header) — used by the
+    /// frontend to report watch heartbeats and to re-validate access.
+    pub video_id: String,
     pub title: String,
     pub duration_ms: u64,
     pub width: u32,
@@ -51,249 +49,154 @@ pub struct PlaybackInfo {
     pub quality: String,
 }
 
-/// The active video server — holds all state needed during playback
-pub struct VideoServer {
-    /// The port the server is listening on
-    port: u16,
-    /// Channel to send shutdown signal
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    /// Path to the .svf file (for display purposes)
-    svf_path: PathBuf,
-}
-
-/// Shared state accessible from warp request handlers.
-/// Arc = thread-safe reference counting, Mutex = thread-safe interior mutability.
-/// This is how multiple concurrent HTTP requests can access the same SvfFile and key.
-struct PlaybackState {
+/// All state needed by the custom-protocol handler to decrypt-on-the-fly.
+/// Uses a std Mutex (the handler is synchronous; no async lock is needed).
+pub struct ActivePlayback {
     svf: Mutex<SvfFile>,
     key: SecureKey,
-    #[allow(dead_code)]
-    token: String,
+    original_size: u64,
+    chunk_size: u64,
+    chunk_count: usize,
+    nonce: [u8; 16],
 }
 
-impl VideoServer {
-    /// Start a new video server for the given .svf file.
-    ///
-    /// This opens the file, derives the decryption key, spawns the HTTP server,
-    /// and returns a VideoServer handle + PlaybackInfo for the frontend.
-    pub async fn start(
-        svf_path: &Path,
-        key: SecureKey,
-    ) -> Result<(Self, PlaybackInfo), AppError> {
-        // Open and parse the .svf file
-        let svf = SvfFile::open(svf_path)?;
-        let _info = svf.header.to_info();
-        let original_size = svf.header.original_size;
-        let chunk_size = svf.header.chunk_size as u64;
-        let nonce = svf.header.encryption_nonce;
-        let chunk_count = svf.header.chunk_count as usize;
+/// Shared slot held in AppState and read by the protocol handler. `None` when
+/// nothing is playing → the scheme returns 404.
+pub type PlaybackSlot = Arc<Mutex<Option<Arc<ActivePlayback>>>>;
 
-        let playback_info = PlaybackInfo {
-            url: String::new(), // filled in below after we know the port
-            title: svf.header.title.clone(),
-            duration_ms: svf.header.duration_ms,
-            width: svf.header.width,
-            height: svf.header.height,
-            quality: svf.header.quality_label().to_string(),
-        };
+/// Build the `<video src>` URL for the registered custom scheme on this platform.
+pub fn stream_url() -> String {
+    // Windows/Android with useHttpsScheme=false → http://<scheme>.localhost
+    #[cfg(any(windows, target_os = "android"))]
+    {
+        format!("http://{}.localhost/video.mp4", STREAM_SCHEME)
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
+    {
+        format!("{}://localhost/video.mp4", STREAM_SCHEME)
+    }
+}
 
-        // Generate a one-time token for this playback session
-        let token = Uuid::new_v4().to_string();
+/// Open the .svf, derive playback metadata, and produce the shared ActivePlayback
+/// plus the PlaybackInfo for the frontend.
+pub fn prepare_playback(
+    svf_path: &Path,
+    key: SecureKey,
+) -> Result<(Arc<ActivePlayback>, PlaybackInfo), AppError> {
+    let svf = SvfFile::open(svf_path)?;
+    let original_size = svf.header.original_size;
+    let chunk_size = svf.header.chunk_size as u64;
+    let nonce = svf.header.encryption_nonce;
+    let chunk_count = svf.header.chunk_count as usize;
+    let video_id = uuid::Uuid::from_bytes(svf.header.video_id).to_string();
 
-        // Create shared state
-        let state = Arc::new(PlaybackState {
-            svf: Mutex::new(svf),
-            key,
-            token: token.clone(),
-        });
+    let info = PlaybackInfo {
+        url: stream_url(),
+        video_id,
+        title: svf.header.title.clone(),
+        duration_ms: svf.header.duration_ms,
+        width: svf.header.width,
+        height: svf.header.height,
+        quality: svf.header.quality_label().to_string(),
+    };
 
-        // Build the warp route
-        let state_filter = {
-            let s = state.clone();
-            warp::any().map(move || s.clone())
-        };
+    let state = Arc::new(ActivePlayback {
+        svf: Mutex::new(svf),
+        key,
+        original_size,
+        chunk_size,
+        chunk_count,
+        nonce,
+    });
 
-        // Capture values for the closure
-        let token_for_route = token.clone();
+    Ok((state, info))
+}
 
-        let video_route = warp::get()
-            .and(warp::path("video.mp4"))
-            .and(warp::query::<std::collections::HashMap<String, String>>())
-            .and(warp::header::optional::<String>("range"))
-            .and(state_filter)
-            .and_then(
-                move |query: std::collections::HashMap<String, String>,
-                      range_header: Option<String>,
-                      state: Arc<PlaybackState>| {
-                    let token_check = token_for_route.clone();
-                    async move {
-                        // Validate token
-                        let req_token = query.get("token").cloned().unwrap_or_default();
-                        if req_token != token_check {
-                            return Ok::<_, warp::Rejection>(
-                                warp::reply::with_status(
-                                    warp::reply::Response::new(
-                                        warp::hyper::Body::from("Forbidden"),
-                                    ),
-                                    warp::http::StatusCode::FORBIDDEN,
-                                )
-                                .into_response(),
-                            );
-                        }
+/// Maximum bytes to return in a single response. The browser sends follow-up
+/// Range requests for the rest. 2 MB keeps memory low and responses fast.
+const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
-                        // Parse Range header
-                        let (range_start, range_end) =
-                            parse_range_header(&range_header, original_size);
+/// Custom-protocol handler: serve a decrypted byte range for the active playback.
+/// Synchronous — decryption is CPU-bound and each response is capped at 2 MB.
+pub fn serve_stream(slot: &PlaybackSlot, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let state = { slot.lock().unwrap().clone() };
+    let Some(state) = state else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(b"No active playback".to_vec())
+            .unwrap();
+    };
 
-                        // Decrypt the requested byte range
-                        let data = decrypt_range(
-                            &state,
-                            range_start,
-                            range_end,
-                            chunk_size,
-                            chunk_count,
-                            &nonce,
-                        )
-                        .await;
-
-                        let data = match data {
-                            Ok(d) => d,
-                            Err(_) => {
-                                return Ok(warp::reply::with_status(
-                                    warp::reply::Response::new(
-                                        warp::hyper::Body::from("Decryption error"),
-                                    ),
-                                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                )
-                                .into_response());
-                            }
-                        };
-
-                        let content_length = data.len();
-
-                        // Build response with proper headers
-                        let response = warp::http::Response::builder()
-                            .status(206)
-                            .header("Content-Type", "video/mp4")
-                            .header("Accept-Ranges", "bytes")
-                            .header("Content-Length", content_length)
-                            .header(
-                                "Content-Range",
-                                format!(
-                                    "bytes {}-{}/{}",
-                                    range_start,
-                                    range_start + content_length as u64 - 1,
-                                    original_size
-                                ),
-                            )
-                            .header("Access-Control-Allow-Origin", "*")
-                            .body(warp::hyper::Body::from(data))
-                            .unwrap();
-
-                        Ok(response.into_response())
-                    }
-                },
-            );
-
-        // CORS preflight support
-        let cors_route = warp::options()
-            .and(warp::path("video.mp4"))
-            .map(|| {
-                warp::http::Response::builder()
-                    .header("Access-Control-Allow-Origin", "*")
-                    .header("Access-Control-Allow-Methods", "GET, OPTIONS")
-                    .header("Access-Control-Allow-Headers", "Range")
-                    .body(warp::hyper::Body::empty())
-                    .unwrap()
-            });
-
-        let routes = video_route.or(cors_route);
-
-        // Bind to 127.0.0.1 with port 0 (OS assigns a random available port)
-        let addr: SocketAddr = ([127, 0, 0, 1], 0).into();
-
-        // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-
-        // bind_with_graceful_shutdown returns (SocketAddr, impl Future)
-        let (bound_addr, server) = warp::serve(routes)
-            .bind_with_graceful_shutdown(addr, async {
-                let _ = shutdown_rx.await;
-            });
-        let port = bound_addr.port();
-
-        // Spawn the server in a background task
-        tokio::spawn(server);
-
-        let url = format!(
-            "http://127.0.0.1:{}/video.mp4?token={}",
-            port, token
-        );
-
-        let mut final_info = playback_info;
-        final_info.url = url;
-
-        let video_server = VideoServer {
-            port,
-            shutdown_tx: Some(shutdown_tx),
-            svf_path: svf_path.to_path_buf(),
-        };
-
-        log::info!(
-            "Video server started on port {} for {:?}",
-            port,
-            svf_path
-        );
-
-        Ok((video_server, final_info))
+    if state.original_size == 0 {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Vec::new())
+            .unwrap();
     }
 
-    /// Stop the video server and clean up
-    pub fn stop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-            log::info!("Video server stopped for {:?}", self.svf_path);
+    let range_header = request
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let (range_start, range_end) = parse_range_header(&range_header, state.original_size);
+
+    match decrypt_range(&state, range_start, range_end) {
+        Ok(data) => {
+            let content_length = data.len();
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header("Content-Type", "video/mp4")
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", content_length.to_string())
+                .header(
+                    "Content-Range",
+                    format!(
+                        "bytes {}-{}/{}",
+                        range_start,
+                        range_start + content_length as u64 - 1,
+                        state.original_size
+                    ),
+                )
+                // On Windows the page is http://tauri.localhost while media loads
+                // from http://stream.localhost; keep media loads unblocked.
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Cache-Control", "no-store")
+                .body(data)
+                .unwrap()
         }
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-}
-
-impl Drop for VideoServer {
-    fn drop(&mut self) {
-        self.stop();
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(b"Decryption error".to_vec())
+            .unwrap(),
     }
 }
 
 // ─── Helper functions ───
 
-/// Maximum bytes to return in a single response.
-/// The browser will send follow-up Range requests for the rest.
-/// 2 MB keeps memory usage low and response time fast.
-const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-
 fn parse_range_header(range: &Option<String>, total_size: u64) -> (u64, u64) {
+    let max_end = total_size.saturating_sub(1);
+
     let Some(range_str) = range else {
-        // No Range header — return first chunk only, not entire file
-        let end = MAX_RESPONSE_BYTES.min(total_size - 1);
-        return (0, end);
+        // No Range header — return first chunk only, not the entire file.
+        return (0, MAX_RESPONSE_BYTES.min(max_end));
     };
 
     let range_str = range_str.trim();
     if !range_str.starts_with("bytes=") {
-        let end = MAX_RESPONSE_BYTES.min(total_size - 1);
-        return (0, end);
+        return (0, MAX_RESPONSE_BYTES.min(max_end));
     }
 
     let range_spec = &range_str[6..]; // skip "bytes="
     let parts: Vec<&str> = range_spec.split('-').collect();
 
+    // Clamp start into [0, max_end] so a past-EOF request (e.g. bytes=2000-3000
+    // on a 1000-byte file) can't underflow / panic in decrypt_range.
     let start = parts
         .first()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(max_end);
 
     let end = parts
         .get(1)
@@ -304,33 +207,32 @@ fn parse_range_header(range: &Option<String>, total_size: u64) -> (u64, u64) {
                 s.parse::<u64>().ok()
             }
         })
-        .unwrap_or_else(|| (start + MAX_RESPONSE_BYTES - 1).min(total_size - 1))
-        .min(total_size - 1);
+        .unwrap_or_else(|| (start + MAX_RESPONSE_BYTES - 1).min(max_end))
+        .min(max_end)
+        .max(start); // guarantee end >= start
 
     (start, end)
 }
 
 /// Decrypt the byte range [range_start, range_end] from the encrypted video.
-async fn decrypt_range(
-    state: &PlaybackState,
+fn decrypt_range(
+    state: &ActivePlayback,
     range_start: u64,
     range_end: u64,
-    chunk_size: u64,
-    chunk_count: usize,
-    nonce: &[u8; 16],
 ) -> Result<Vec<u8>, AppError> {
+    let chunk_size = state.chunk_size;
     let first_chunk = (range_start / chunk_size) as usize;
-    let last_chunk = (range_end / chunk_size).min(chunk_count as u64 - 1) as usize;
+    let last_chunk = (range_end / chunk_size).min(state.chunk_count as u64 - 1) as usize;
 
     let mut decrypted_buffer = Vec::new();
-
-    let mut svf = state.svf.lock().await;
+    let mut svf = state.svf.lock().unwrap();
 
     for chunk_idx in first_chunk..=last_chunk {
         let encrypted = svf.read_chunk(chunk_idx)?;
-        let decrypted = decrypt_chunk(&state.key, nonce, chunk_idx as u64, &encrypted)?;
+        let decrypted = decrypt_chunk(&state.key, &state.nonce, chunk_idx as u64, &encrypted)?;
         decrypted_buffer.extend_from_slice(&decrypted);
     }
+    drop(svf);
 
     let buffer_start_offset = first_chunk as u64 * chunk_size;
     let slice_start = (range_start - buffer_start_offset) as usize;
