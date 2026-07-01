@@ -31,6 +31,7 @@ from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.course import Course, CourseVideo
 from app.models.enrollment import Enrollment
+from app.services.key_service import _user_has_enrollment_access
 from app.models.user import User
 from app.models.video import Video
 from app.models.watch_event import WatchAggregate, WatchEvent
@@ -101,12 +102,15 @@ async def heartbeat(
 ):
     """Append a WatchEvent and upsert the daily WatchAggregate row.
 
-    Note: this does NOT validate enrollment — the player has already passed
-    license validation when it called /api/videos/key. We just record what
-    was watched. If the upstream license check is bypassed somehow, the
-    student still gets logged but the dashboard will show their (unauthorized)
-    activity, which is useful for the admin to detect.
+    Access-gated: only a student with an active enrollment (or a free-preview
+    video) may record activity, mirroring /api/videos/key. This stops
+    unenrolled or REVOKED users — and non-student principals like a tenant
+    admin — from poisoning the SP-012 analytics.
     """
+    # Only students record watch activity (impersonation issues a student token).
+    if user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can record watch activity")
+
     try:
         vid = uuid.UUID(body.video_id)
     except ValueError:
@@ -133,9 +137,20 @@ async def heartbeat(
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found in your tenant")
 
+    # Enrollment gate (parity with /api/videos/key): an unenrolled or REVOKED
+    # student must not be able to record watch events. Free previews are open.
+    if not video.is_free_preview and not await _user_has_enrollment_access(
+        session, user.id, vid
+    ):
+        raise HTTPException(
+            status_code=403, detail="No active enrollment grants access to this video"
+        )
+
     # Clamp delta to a sane window so a buggy player can't inflate numbers.
     delta = max(0, min(body.watched_delta_ms, 60_000))
-    pos = max(0, body.position_ms)
+    # Clamp position into [0, duration] so out-of-range values can't yield
+    # >100% watch percent or false completions in analytics.
+    pos = max(0, min(body.position_ms, max(0, video.duration_ms)))
 
     now = datetime.now(timezone.utc)
     event = WatchEvent(

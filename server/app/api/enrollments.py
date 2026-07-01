@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,10 +103,15 @@ async def _upsert_enrollment(
         )
     )).scalar_one_or_none()
     if existing is not None:
+        was_reactivated = not existing.is_active
         existing.is_active = True
         existing.expires_at = expires_at
-        existing.enrolled_at = datetime.now(timezone.utc)
         existing.enrolled_by_user_id = enrolled_by_user_id
+        # Only refresh enrolled_at on a genuine re-enrollment (was revoked). A
+        # no-op re-POST on an already-active enrollment must NOT rewrite the
+        # original enrollment date.
+        if was_reactivated:
+            existing.enrolled_at = datetime.now(timezone.utc)
         return existing, False
 
     e = Enrollment(
@@ -142,6 +147,7 @@ async def _to_enrollment_out(session: AsyncSession, e: Enrollment) -> Enrollment
 async def create_enrollment(
     body: EnrollmentCreate,
     request: Request,
+    response: Response,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
@@ -158,6 +164,9 @@ async def create_enrollment(
     enrollment, was_created = await _upsert_enrollment(
         session, uid, cid, user.id, body.expires_at
     )
+    # A no-op / reactivation is not a newly created resource → 200, not 201.
+    if not was_created:
+        response.status_code = 200
     await session.commit()
     await session.refresh(enrollment)
 

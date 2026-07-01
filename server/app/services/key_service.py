@@ -249,7 +249,7 @@ async def get_user_licensed_keys(
             )
 
             bundle.append({
-                "video_id": video.id.hex,
+                "video_id": str(video.id),
                 "quality": quality_str,
                 "key": derived.hex(),
             })

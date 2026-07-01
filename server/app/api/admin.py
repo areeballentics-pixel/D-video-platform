@@ -172,15 +172,29 @@ async def list_students(
 
 @router.post("/students")
 async def create_student(
-    email: str = Form(...),
-    password: str = Form(...),
-    license_key: str = Form(None),
+    request: Request,
     user: User = Depends(require_admin),
     session: AsyncSession = Depends(get_db),
 ):
-    """Create a new student account."""
+    """Create a new student account.
+
+    Accepts BOTH application/json and application/x-www-form-urlencoded, so a
+    JSON-standardised client and the form-posting encryptor both work. (The
+    rest of the admin API is JSON; create-student was the lone form-only
+    outlier that returned a misleading 422 to JSON callers.)
+    """
+    ctype = request.headers.get("content-type", "")
+    if "application/json" in ctype:
+        data = await request.json()
+    else:
+        data = dict(await request.form())
+    email = str(data.get("email") or "").strip()
+    password = data.get("password")
+    license_key = data.get("license_key")
+    if not email or not password:
+        raise HTTPException(status_code=422, detail="email and password are required")
+
     # Validate email format (AP-001 — same gate as tenant admin emails).
-    email = (email or "").strip()
     if not is_valid_email(email):
         raise HTTPException(status_code=422, detail="Invalid email address")
 
@@ -239,7 +253,22 @@ async def get_student_devices(
     session: AsyncSession = Depends(get_db),
 ):
     """View a student's registered devices."""
-    sid = uuid.UUID(student_id)
+    try:
+        sid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student_id")
+
+    # Tenant scoping: the student must belong to the caller's tenant. Without
+    # this, a tenant admin could enumerate another tenant's device PII
+    # (cross-tenant IDOR). Mirrors the reactivate/reset-password handlers.
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid, User.tenant_id == user.tenant_id, User.role == "student",
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
     result = await session.execute(
         select(Device).where(Device.user_id == sid).order_by(Device.registered_at.desc())
     )
@@ -269,9 +298,24 @@ async def force_deregister_device(
     session: AsyncSession = Depends(get_db),
 ):
     """Admin force-deregister a student's device (no cooldown)."""
-    dev = uuid.UUID(device_id)
+    try:
+        sid = uuid.UUID(student_id)
+        dev = uuid.UUID(device_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+    # Tenant scoping: student must belong to the caller's tenant, else a tenant
+    # admin could force-deregister another tenant's devices (cross-tenant IDOR).
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid, User.tenant_id == user.tenant_id, User.role == "student",
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
     result = await session.execute(
-        select(Device).where(Device.id == dev, Device.user_id == uuid.UUID(student_id))
+        select(Device).where(Device.id == dev, Device.user_id == sid)
     )
     device = result.scalar_one_or_none()
     if not device:
@@ -350,8 +394,8 @@ async def reactivate_student_device(
 
 
 class QualityEncryptionParams(BaseModel):
-    salt: str = Field(..., min_length=64, max_length=64)   # 32 bytes hex
-    nonce: str = Field(..., min_length=32, max_length=32)  # 16 bytes hex
+    salt: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$")   # 32 bytes hex
+    nonce: str = Field(..., min_length=32, max_length=32, pattern=r"^[0-9a-fA-F]{32}$")  # 16 bytes hex
 
 
 class RegisterEncryptedVideoRequest(BaseModel):
@@ -758,6 +802,17 @@ async def clear_student_devices(
         sid = uuid.UUID(student_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid student_id")
+
+    # Tenant scoping: student must belong to the caller's tenant, else a tenant
+    # admin could wipe another tenant's devices / lock out their students
+    # (cross-tenant IDOR).
+    student = (await session.execute(
+        select(User).where(
+            User.id == sid, User.tenant_id == user.tenant_id, User.role == "student",
+        )
+    )).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
 
     devices = (await session.execute(
         select(Device).where(Device.user_id == sid, Device.is_active.is_(True))

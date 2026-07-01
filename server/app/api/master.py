@@ -1184,7 +1184,19 @@ async def master_audit(
         else:
             try:
                 tid = uuid.UUID(tenant_id)
-                q = q.where(AuditLog.tenant_id == tid)
+                # Match rows tagged with this tenant_id OR tenant-lifecycle rows
+                # whose FK was nulled on delete but still carry
+                # target_id=<tenant id>, so a deleted tenant's full history
+                # (create/suspend/delete) stays retrievable by this filter.
+                q = q.where(
+                    sa.or_(
+                        AuditLog.tenant_id == tid,
+                        sa.and_(
+                            AuditLog.target_type == "tenant",
+                            AuditLog.target_id == str(tid),
+                        ),
+                    )
+                )
             except ValueError:
                 pass
 
