@@ -73,10 +73,6 @@ export default function LoginPage() {
         >
           {submitting ? "Signing in…" : "Sign in"}
         </button>
-
-        <p className="mt-4 text-xs text-slate-500">
-          Server: {status?.server_url}
-        </p>
       </form>
     </div>
   );

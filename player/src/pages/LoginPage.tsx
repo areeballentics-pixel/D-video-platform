@@ -107,10 +107,6 @@ export default function LoginPage() {
             {loading ? "Signing in..." : "Sign In"}
           </button>
         </form>
-
-        <p className="mt-6 text-center text-xs text-[var(--color-text-muted)]">
-          Test: student@test-sap.com / student123
-        </p>
       </div>
     </div>
   );
