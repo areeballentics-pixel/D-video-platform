@@ -1,6 +1,6 @@
 [package]
 name = "svp-encryptor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Institute-side video encryption desktop app for the Secure Video Platform"
 
