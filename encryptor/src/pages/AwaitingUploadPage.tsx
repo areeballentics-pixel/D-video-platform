@@ -4,7 +4,7 @@
 // URLs (for online auto-download), free-preview flag, stream-only flag.
 
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPatch, apiPut } from "@/lib/rest";
+import { apiDelete, apiGet, apiPatch, apiPut } from "@/lib/rest";
 
 interface VideoRow {
   video_id: string;
@@ -30,6 +30,7 @@ export default function AwaitingUploadPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<VideoRow | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -42,6 +43,29 @@ export default function AwaitingUploadPage() {
       setLoading(false);
     }
   }, []);
+
+  // Permanently deletes the video (row + cascade) — distinct from the
+  // course-detach "Remove" in CoursesPage. Confirms first, then re-fetches.
+  const handleDelete = useCallback(
+    async (v: VideoRow) => {
+      const ok = window.confirm(
+        `Delete "${v.title}" permanently?\n\n` +
+          "This removes it from all courses and cannot be undone.",
+      );
+      if (!ok) return;
+      setError("");
+      setDeletingId(v.video_id);
+      try {
+        await apiDelete(`/api/admin/videos/${v.video_id}`);
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Delete failed");
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [load],
+  );
 
   useEffect(() => {
     load();
@@ -95,12 +119,22 @@ export default function AwaitingUploadPage() {
                     {new Date(v.created_at).toLocaleDateString()}
                   </td>
                   <td className="px-4 py-2.5 text-right">
-                    <button
-                      onClick={() => setEditing(v)}
-                      className="rounded-md border border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-800"
-                    >
-                      Edit
-                    </button>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={() => setEditing(v)}
+                        className="rounded-md border border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-800"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDelete(v)}
+                        disabled={deletingId === v.video_id}
+                        title="Delete this video permanently"
+                        className="rounded-md border border-red-900 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950 disabled:opacity-50"
+                      >
+                        {deletingId === v.video_id ? "Deleting…" : "Delete video"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

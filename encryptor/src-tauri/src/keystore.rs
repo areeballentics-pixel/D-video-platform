@@ -29,6 +29,12 @@ pub struct AppConfig {
     pub encryptor_device_id: Option<String>,
     pub tenant_id: Option<String>,
     pub tenant_name: Option<String>,
+    /// Which tenant the cached master key belongs to (set on register/refresh).
+    /// Encryption is blocked if this doesn't match the logged-in tenant, so a
+    /// stale key from a previous tenant can never silently encrypt undecryptable
+    /// files. `#[serde(default)]` keeps old config.json files loading cleanly.
+    #[serde(default)]
+    pub master_key_tenant_id: Option<String>,
     /// Where the encryptor writes finished .svf files. Defaults to
     /// "<documents>/SVP Encryptor/output". Institute admin can override.
     pub output_dir: Option<String>,
@@ -48,6 +54,7 @@ impl AppConfig {
             encryptor_device_id: None,
             tenant_id: None,
             tenant_name: None,
+            master_key_tenant_id: None,
             output_dir: None,
             max_concurrent_jobs: 1,
         }

@@ -155,6 +155,9 @@ pub async fn register_encryptor(
     {
         let mut cfg = state.config.lock().await;
         cfg.encryptor_device_id = Some(resp.encryptor_device_id.clone());
+        // Record which tenant this master key belongs to (the logged-in tenant),
+        // so start_encryption_job can reject a stale key after a tenant switch.
+        cfg.master_key_tenant_id = cfg.tenant_id.clone();
         keystore::save_config(&cfg).ok();
     }
 
@@ -193,6 +196,11 @@ pub async fn refresh_master_key(
     *state.master_key.lock().await = Some(arr);
 
     keystore::save_master_key(&resp.master_key_hex)?;
+    {
+        let mut cfg = state.config.lock().await;
+        cfg.master_key_tenant_id = cfg.tenant_id.clone();
+        keystore::save_config(&cfg).ok();
+    }
     Ok(())
 }
 
@@ -211,6 +219,11 @@ pub async fn forget_master_key(state: State<'_, AppState>) -> Result<(), AppErro
     state.api.clear_tokens().await;
     *state.master_key.lock().await = None;
     keystore::delete_master_key()?;
+    {
+        let mut cfg = state.config.lock().await;
+        cfg.master_key_tenant_id = None;
+        keystore::save_config(&cfg).ok();
+    }
     Ok(())
 }
 
@@ -250,6 +263,22 @@ pub async fn start_encryption_job(
         .ok_or_else(|| AppError::Auth("no tenant context — log in first".into()))?;
     let tenant_id = Uuid::parse_str(&tenant_id_str)
         .map_err(|_| AppError::Validation("tenant_id is not a UUID".into()))?;
+
+    // ── Guard: the cached master key must belong to the tenant we're logged
+    // into. Otherwise we'd encrypt with a stale key from a previous tenant and
+    // the resulting .svf would be permanently undecryptable (silent data loss).
+    // Only enforced when the key's tenant is known (set on register/refresh);
+    // an unknown/None value is allowed for backward compatibility with keys
+    // registered before this guard existed.
+    if let Some(mk_tenant) = &cfg.master_key_tenant_id {
+        if mk_tenant != &tenant_id_str {
+            return Err(AppError::Auth(
+                "The loaded master key belongs to a different tenant than the one \
+                 you are logged into. Re-register the encryptor for this tenant \
+                 (Register Encryptor) before encrypting.".into(),
+            ));
+        }
+    }
 
     // ── Hard gate: reject non-video / corrupted inputs BEFORE spawning a job ──
     // (ENC-003/ENC-004) A .txt renamed .mp4 or a hex-corrupted MP4 must never
