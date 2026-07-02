@@ -317,4 +317,109 @@ mod tests {
         assert_eq!(start, 900);
         assert_eq!(end, 999);
     }
+
+    // ── Stream isolation (Report #3 fix) ──────────────────────────────────
+    // The bug: every video shared ONE stream URL, so the WebView could serve a
+    // previous video's cached byte ranges for a new video (wrong video, then
+    // corruption of the earlier one). These tests prove it can no longer happen.
+
+    fn build_test_svf(
+        path: &std::path::Path,
+        video_id: [u8; 16],
+        key: &SecureKey,
+        nonce: [u8; 16],
+        content: &[u8],
+        chunk_size: u32,
+    ) {
+        use svf_core::{encrypt_chunk, SvfWriter, SvfWriterParams};
+        let params = SvfWriterParams {
+            video_id,
+            tenant_id: [0u8; 16],
+            encryption_salt: [0u8; 32],
+            encryption_nonce: nonce,
+            chunk_size,
+            quality: 1,
+            codec: 0,
+            width: 1280,
+            height: 720,
+            fps_num: 30,
+            fps_den: 1,
+            duration_ms: 1000,
+            original_size: content.len() as u64,
+            title: "t".to_string(),
+        };
+        let mut writer = SvfWriter::create(path, params).unwrap();
+        for (i, chunk) in content.chunks(chunk_size as usize).enumerate() {
+            let ct = encrypt_chunk(key, &nonce, i as u64, chunk).unwrap();
+            writer.append_chunk(&ct).unwrap();
+        }
+        writer.finalize([0u8; 32]).unwrap();
+    }
+
+    fn range_req(url: &str) -> tauri::http::Request<Vec<u8>> {
+        tauri::http::Request::builder()
+            .uri(url)
+            .header("range", "bytes=0-100")
+            .body(Vec::new())
+            .unwrap()
+    }
+
+    /// Two videos played back to back can never cross-contaminate: each gets a
+    /// unique URL, only the active playback's URL serves bytes, and any stale
+    /// (previous-playback) URL is refused with 404.
+    #[test]
+    fn stream_isolation_prevents_cross_video_bytes() {
+        let dir = std::env::temp_dir().join(format!("svp-stream-iso-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key_a = SecureKey::new([0x11u8; 32]);
+        let key_b = SecureKey::new([0x22u8; 32]);
+        let (nonce_a, nonce_b) = ([0xA0u8; 16], [0xB0u8; 16]);
+        let content_a = vec![0xAAu8; 8192];
+        let content_b = vec![0xBBu8; 8192];
+        let path_a = dir.join("a.svf");
+        let path_b = dir.join("b.svf");
+        build_test_svf(&path_a, [1u8; 16], &key_a, nonce_a, &content_a, 4096);
+        build_test_svf(&path_b, [2u8; 16], &key_b, nonce_b, &content_b, 4096);
+
+        let (pb_a, info_a) = prepare_playback(&path_a, key_a).unwrap();
+        let (pb_b, info_b) = prepare_playback(&path_b, key_b).unwrap();
+
+        // Core cache-bust: each playback gets a distinct URL.
+        assert_ne!(info_a.url, info_b.url, "each playback must get a unique stream URL");
+
+        let slot: PlaybackSlot = Arc::new(Mutex::new(None));
+
+        // Video A active: A's URL serves A's bytes; B's URL is stale → 404.
+        *slot.lock().unwrap() = Some(pb_a.clone());
+        let ra = serve_stream(&slot, &range_req(&info_a.url));
+        assert_eq!(ra.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(
+            !ra.body().is_empty() && ra.body().iter().all(|&b| b == 0xAA),
+            "A's own URL must serve A's content"
+        );
+        let rb_stale = serve_stream(&slot, &range_req(&info_b.url));
+        assert_eq!(
+            rb_stale.status(),
+            StatusCode::NOT_FOUND,
+            "a different video's URL must 404 while A is active (no cross-serve)"
+        );
+
+        // Video B active: B's URL serves B's bytes; A's URL is now stale → 404.
+        *slot.lock().unwrap() = Some(pb_b.clone());
+        let rb = serve_stream(&slot, &range_req(&info_b.url));
+        assert_eq!(rb.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(
+            !rb.body().is_empty() && rb.body().iter().all(|&b| b == 0xBB),
+            "B's own URL must serve B's content"
+        );
+        let ra_stale = serve_stream(&slot, &range_req(&info_a.url));
+        assert_eq!(
+            ra_stale.status(),
+            StatusCode::NOT_FOUND,
+            "the previous video's URL must 404 once B is active (no retroactive corruption)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
