@@ -62,13 +62,15 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<AppStatus, AppErro
     // logged into. After switching tenants the previous tenant's key is still
     // cached (master_key_loaded=true) but must not be used — the UI reads this
     // to force re-registration instead of dropping the admin into an encryptor
-    // that can't encrypt for the new tenant. A legacy key with no recorded
-    // tenant is assumed OK so existing installs aren't disrupted.
+    // that can't encrypt for the new tenant. A key whose tenant was never
+    // recorded (an older registration) is UNCONFIRMED → treated as not-matching
+    // so the UI forces a re-registration (which records the tenant). A one-time
+    // re-register is far safer than silently encrypting with a stale/wrong-tenant
+    // key and producing undecryptable files.
     let mk_matches = mk_loaded
         && match (&cfg.master_key_tenant_id, &cfg.tenant_id) {
             (Some(mk), Some(t)) => mk == t,
-            (None, _) => true,
-            (Some(_), None) => false,
+            _ => false,
         };
     Ok(AppStatus {
         server_url: cfg.server_url,
@@ -280,20 +282,18 @@ pub async fn start_encryption_job(
     let tenant_id = Uuid::parse_str(&tenant_id_str)
         .map_err(|_| AppError::Validation("tenant_id is not a UUID".into()))?;
 
-    // ── Guard: the cached master key must belong to the tenant we're logged
-    // into. Otherwise we'd encrypt with a stale key from a previous tenant and
-    // the resulting .svf would be permanently undecryptable (silent data loss).
-    // Only enforced when the key's tenant is known (set on register/refresh);
-    // an unknown/None value is allowed for backward compatibility with keys
-    // registered before this guard existed.
-    if let Some(mk_tenant) = &cfg.master_key_tenant_id {
-        if mk_tenant != &tenant_id_str {
-            return Err(AppError::Auth(
-                "The loaded master key belongs to a different tenant than the one \
-                 you are logged into. Re-register the encryptor for this tenant \
-                 (Register Encryptor) before encrypting.".into(),
-            ));
-        }
+    // ── Guard: the cached master key must be CONFIRMED to belong to the tenant
+    // we're logged into. If it belongs to a different tenant, OR its tenant was
+    // never recorded (an older registration), refuse — otherwise we'd encrypt
+    // with a stale/unverified key and produce a permanently undecryptable .svf
+    // (silent data loss). The UI's re-registration gate normally catches this
+    // first; this is the last line of defense.
+    if cfg.master_key_tenant_id.as_deref() != Some(tenant_id_str.as_str()) {
+        return Err(AppError::Auth(
+            "The loaded master key isn't confirmed for the tenant you're logged \
+             into. Re-register the encryptor for this tenant (Register Encryptor) \
+             before encrypting.".into(),
+        ));
     }
 
     // ── Hard gate: reject non-video / corrupted inputs BEFORE spawning a job ──
