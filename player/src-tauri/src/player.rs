@@ -52,6 +52,13 @@ pub struct PlaybackInfo {
 /// All state needed by the custom-protocol handler to decrypt-on-the-fly.
 /// Uses a std Mutex (the handler is synchronous; no async lock is needed).
 pub struct ActivePlayback {
+    /// Unique per-playback token embedded in the stream URL. The WebView keys
+    /// its media cache on the URL, so a FIXED url served across two different
+    /// videos let it replay a previous video's cached byte ranges for a new
+    /// video (wrong video / corruption, and it poisoned the earlier video too).
+    /// A fresh token per playback gives each video a distinct url, and the
+    /// handler 404s any request whose token isn't the active one.
+    token: String,
     svf: Mutex<SvfFile>,
     key: SecureKey,
     original_size: u64,
@@ -65,15 +72,17 @@ pub struct ActivePlayback {
 pub type PlaybackSlot = Arc<Mutex<Option<Arc<ActivePlayback>>>>;
 
 /// Build the `<video src>` URL for the registered custom scheme on this platform.
-pub fn stream_url() -> String {
+pub fn stream_url(token: &str) -> String {
+    // A unique `token` per playback makes each video's url distinct, so the
+    // WebView can never serve a previous video's cached bytes for a new video.
     // Windows/Android with useHttpsScheme=false → http://<scheme>.localhost
     #[cfg(any(windows, target_os = "android"))]
     {
-        format!("http://{}.localhost/video.mp4", STREAM_SCHEME)
+        format!("http://{}.localhost/{}.mp4", STREAM_SCHEME, token)
     }
     #[cfg(not(any(windows, target_os = "android")))]
     {
-        format!("{}://localhost/video.mp4", STREAM_SCHEME)
+        format!("{}://localhost/{}.mp4", STREAM_SCHEME, token)
     }
 }
 
@@ -90,8 +99,11 @@ pub fn prepare_playback(
     let chunk_count = svf.header.chunk_count as usize;
     let video_id = uuid::Uuid::from_bytes(svf.header.video_id).to_string();
 
+    // Fresh random token per playback → unique stream url (WebView cache-bust).
+    let token = uuid::Uuid::new_v4().simple().to_string();
+
     let info = PlaybackInfo {
-        url: stream_url(),
+        url: stream_url(&token),
         video_id,
         title: svf.header.title.clone(),
         duration_ms: svf.header.duration_ms,
@@ -101,6 +113,7 @@ pub fn prepare_playback(
     };
 
     let state = Arc::new(ActivePlayback {
+        token,
         svf: Mutex::new(svf),
         key,
         original_size,
@@ -126,6 +139,23 @@ pub fn serve_stream(slot: &PlaybackSlot, request: &Request<Vec<u8>>) -> Response
             .body(b"No active playback".to_vec())
             .unwrap();
     };
+
+    // Serve ONLY the currently active playback. A stale request from a previous
+    // video's <video> element carries that video's (old) token in its url; it
+    // must not receive this video's bytes — that's the "wrong video / corrupt"
+    // failure. Mismatched token → 404, so the WebView can't cross-contaminate.
+    let req_token = request
+        .uri()
+        .path()
+        .trim_start_matches('/')
+        .strip_suffix(".mp4")
+        .unwrap_or("");
+    if req_token != state.token {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(b"Stale playback token".to_vec())
+            .unwrap();
+    }
 
     if state.original_size == 0 {
         return Response::builder()

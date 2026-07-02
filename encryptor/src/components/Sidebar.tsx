@@ -1,4 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { tauri } from "@/lib/tauri";
 import { useAppStore } from "@/store/appStore";
 
@@ -16,6 +17,13 @@ const items = [
 export default function Sidebar() {
   const { status, refresh } = useAppStore();
   const location = useLocation();
+  const [version, setVersion] = useState("");
+
+  // Read the REAL app version (env!("CARGO_PKG_VERSION")) instead of a hardcoded
+  // string, so the sidebar can't disagree with the installer's version.
+  useEffect(() => {
+    tauri.getAppVersion().then((v) => setVersion(v)).catch(() => {});
+  }, []);
 
   const handleLogout = async () => {
     await tauri.logout();
@@ -26,7 +34,9 @@ export default function Sidebar() {
     <aside className="flex w-64 flex-col border-r border-slate-800 bg-slate-900">
       <div className="border-b border-slate-800 px-5 py-5">
         <h1 className="text-lg font-bold text-white">SVP Encryptor</h1>
-        <p className="text-xs text-slate-400">v0.1.0 · institute-side</p>
+        <p className="text-xs text-slate-400">
+          {version ? `v${version}` : ""} · institute-side
+        </p>
       </div>
 
       <nav className="flex-1 space-y-1 p-3">
