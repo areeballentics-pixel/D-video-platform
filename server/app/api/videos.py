@@ -9,11 +9,12 @@ The /key endpoint also serves as the access-control gate; it raises 403 if
 the student isn't enrolled in any course containing the video.
 """
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -31,6 +32,7 @@ from app.services.key_service import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class VideoKeyResponse(BaseModel):
@@ -50,6 +52,13 @@ async def get_video_key_endpoint(
     session: AsyncSession = Depends(get_db),
 ):
     """Validate access + return decryption key + download metadata."""
+    # DIAGNOSTIC (temp): log every key request so we can compare a working play
+    # vs a failing replay (same video_id/quality? or different?).
+    logger.info(
+        "videos/key REQUEST video_id=%s quality=%s user=%s tenant=%s fp=%s",
+        body.video_id, body.quality, user.id, user.tenant_id,
+        (body.device_fingerprint or "")[:12],
+    )
     try:
         hex_key = await get_video_key(
             session,
@@ -59,6 +68,25 @@ async def get_video_key_endpoint(
             device_fingerprint=body.device_fingerprint,
         )
     except VideoNotFound as e:
+        # DIAGNOSTIC (temp): why did this 404? Does the video exist at all,
+        # vs in the caller's tenant? Distinguishes "unknown id" from "salt gap".
+        try:
+            _vid = uuid.UUID(body.video_id)
+            _any = await session.scalar(
+                select(func.count()).select_from(Video).where(Video.id == _vid)
+            )
+            _mine = await session.scalar(
+                select(func.count()).select_from(Video).where(
+                    Video.id == _vid, Video.tenant_id == user.tenant_id
+                )
+            )
+        except Exception:
+            _any = _mine = "?"
+        logger.warning(
+            "videos/key 404 reason=%r video_id=%s quality=%s user=%s tenant=%s "
+            "exists_any=%s exists_in_tenant=%s",
+            str(e), body.video_id, body.quality, user.id, user.tenant_id, _any, _mine,
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except DeviceMismatch as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))

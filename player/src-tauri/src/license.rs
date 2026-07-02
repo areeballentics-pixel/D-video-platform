@@ -573,6 +573,11 @@ impl LicenseManager {
             reqwest::StatusCode::FORBIDDEN => Err(AppError::License(
                 "Access denied. Your license may have been revoked.".to_string(),
             )),
+            reqwest::StatusCode::NOT_FOUND => Err(AppError::License(
+                "This video is not registered on the server — it may have been removed, or \
+                 this file is an older copy whose video was re-encrypted with a new ID. \
+                 Ask your institute for the current file.".to_string(),
+            )),
             s if s.is_server_error() => Err(AppError::License("Server error".to_string())),
             _ => Err(AppError::License(format!(
                 "Request failed with status {}",
