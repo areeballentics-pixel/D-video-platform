@@ -14,6 +14,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.device import Device, DeviceChange
+from app.models.tenant import Tenant
 from app.models.user import User
 
 
@@ -34,6 +35,12 @@ async def authenticate_user(
     candidates = result.scalars().all()
     for user in candidates:
         if user.password_hash and verify_password(password, user.password_hash):
+            # Block login when the user's tenant is suspended/revoked. `continue`
+            # (not return) because the same email can exist in another, still-
+            # active tenant that should still be allowed to log in.
+            tenant = await session.get(Tenant, user.tenant_id)
+            if tenant is None or not tenant.is_active:
+                continue
             # v1.5: track last_login_at — used by master dashboard's "last
             # admin login" column to spot dormant tenants. Best-effort: a
             # commit failure here doesn't block the login itself.
@@ -56,7 +63,13 @@ async def authenticate_by_key(
             User.license_key == license_key, User.is_active == True  # noqa: E712
         )
     )
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+    if user is not None:
+        # Block login when the user's tenant is suspended/revoked.
+        tenant = await session.get(Tenant, user.tenant_id)
+        if tenant is None or not tenant.is_active:
+            return None
+    return user
 
 
 async def register_device_on_login(

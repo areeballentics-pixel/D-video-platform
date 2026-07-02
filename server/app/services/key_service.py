@@ -93,6 +93,15 @@ async def validate_license(
 
     device.last_seen_at = datetime.now(timezone.utc)
 
+    # ── Tenant kill-switch ──
+    # A suspended/revoked tenant immediately cuts off ALL its students. Both
+    # /api/videos/key (new plays) and /api/licenses/validate (the player's live
+    # re-validation, SP-009/014) call this, so in-progress playback also stops
+    # on the next check, not just new plays.
+    tenant = await session.get(Tenant, user.tenant_id)
+    if tenant is None or not tenant.is_active:
+        raise LicenseInvalid("Your institute's access has been suspended. Contact your administrator.")
+
     # ── Video lookup ──
     video = await session.get(Video, video_id)
     if video is None:

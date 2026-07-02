@@ -1046,7 +1046,12 @@ impl RevalidationMonitor {
         tokio::spawn(async move {
             use tauri::Emitter;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
-            interval.tick().await; // consume the immediate first tick
+            // Do NOT consume the first tick — validate IMMEDIATELY at playback
+            // start. A student playing from the cached offline bundle never
+            // contacts the server otherwise, so a revoked enrollment or a
+            // SUSPENDED tenant would only take effect 120s later. Validating now
+            // cuts playback off within ~1s when online. Offline, the check
+            // errors and we stay silent, preserving the 20-day offline grace.
 
             loop {
                 tokio::select! {
