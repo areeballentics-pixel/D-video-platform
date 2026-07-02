@@ -5,6 +5,7 @@ export interface AppStatus {
   server_url: string;
   authenticated: boolean;
   master_key_loaded: boolean;
+  master_key_matches_tenant: boolean;
   last_admin_email: string | null;
   encryptor_device_id: string | null;
   tenant_id: string | null;

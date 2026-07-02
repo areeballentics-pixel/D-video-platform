@@ -51,7 +51,10 @@ export default function App() {
     );
   }
 
-  if (!status.master_key_loaded) {
+  // Force (re-)registration when there's no master key OR the cached key
+  // belongs to a DIFFERENT tenant (e.g. after switching tenants) — otherwise
+  // the admin lands in an encryptor that can't encrypt for this tenant.
+  if (!status.master_key_loaded || !status.master_key_matches_tenant) {
     return location.pathname === "/register-encryptor" ? (
       <Routes>
         <Route

@@ -31,6 +31,9 @@ pub struct AppStatus {
     pub server_url: String,
     pub authenticated: bool,
     pub master_key_loaded: bool,
+    /// True only if the loaded master key belongs to the logged-in tenant.
+    /// False after a tenant switch with a stale key → UI forces re-registration.
+    pub master_key_matches_tenant: bool,
     pub last_admin_email: Option<String>,
     pub encryptor_device_id: Option<String>,
     pub tenant_id: Option<String>,
@@ -55,10 +58,23 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<AppStatus, AppErro
     let cfg = state.config.lock().await.clone();
     let mk_loaded = state.master_key.lock().await.is_some();
     let auth = state.api.is_authenticated().await;
+    // A loaded master key is only usable if it belongs to the tenant we're
+    // logged into. After switching tenants the previous tenant's key is still
+    // cached (master_key_loaded=true) but must not be used — the UI reads this
+    // to force re-registration instead of dropping the admin into an encryptor
+    // that can't encrypt for the new tenant. A legacy key with no recorded
+    // tenant is assumed OK so existing installs aren't disrupted.
+    let mk_matches = mk_loaded
+        && match (&cfg.master_key_tenant_id, &cfg.tenant_id) {
+            (Some(mk), Some(t)) => mk == t,
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
     Ok(AppStatus {
         server_url: cfg.server_url,
         authenticated: auth,
         master_key_loaded: mk_loaded,
+        master_key_matches_tenant: mk_matches,
         last_admin_email: cfg.last_admin_email,
         encryptor_device_id: cfg.encryptor_device_id,
         tenant_id: cfg.tenant_id,
