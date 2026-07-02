@@ -249,7 +249,11 @@ async def get_user_licensed_keys(
             )
 
             bundle.append({
-                "video_id": str(video.id),
+                # DASHLESS hex — the shipped player matches licensed-bundle keys
+                # on hex(video_id) (see player license.rs fetch_video_key). Do NOT
+                # send a dashed UUID here or the offline bundle lookup breaks on
+                # every deployed player. (Reverted the 102e168 "consistency" change.)
+                "video_id": video.id.hex,
                 "quality": quality_str,
                 "key": derived.hex(),
             })
