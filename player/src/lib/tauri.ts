@@ -1,7 +1,7 @@
-/** Typed wrappers around Tauri invoke() calls */
+﻿/** Typed wrappers around Tauri invoke() calls */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { SvfInfo, PlaybackInfo, DeviceInfo } from "./types";
+import type { SvfInfo, PlaybackInfo, DeviceInfo, StudentBatchesResponse } from "./types";
 
 export interface AuthStatus {
   authenticated: boolean;
@@ -26,6 +26,10 @@ export async function logout(): Promise<void> {
 
 export async function scanLibrary(folder: string): Promise<SvfInfo[]> {
   return invoke("scan_library", { folder });
+}
+
+export async function getStudentBatches(): Promise<StudentBatchesResponse> {
+  return invoke("get_student_batches");
 }
 
 export async function startPlayback(videoPath: string): Promise<PlaybackInfo> {

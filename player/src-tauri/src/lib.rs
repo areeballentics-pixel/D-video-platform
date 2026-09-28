@@ -62,6 +62,7 @@ pub fn run() {
             commands::stop_playback,
             commands::download_svf,
             commands::report_watch_heartbeat,
+            commands::get_student_batches,
         ])
         // ─── App setup (runs once on launch) ───
         .setup(|_app| {

@@ -76,6 +76,8 @@ pub struct SvfInfo {
     pub width: u32,
     pub height: u32,
     pub quality: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
 }
 
 pub struct SvfFile {
@@ -108,6 +110,7 @@ impl SvfHeader {
             width: self.width,
             height: self.height,
             quality: self.quality_label().to_string(),
+            file_path: None,
         }
     }
 }

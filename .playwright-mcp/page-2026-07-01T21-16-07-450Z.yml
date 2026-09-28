@@ -1,0 +1,19 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - img [ref=e6]
+      - heading "Master Dashboard" [level=1] [ref=e8]
+      - paragraph [ref=e9]: Platform-level administration
+      - generic [ref=e10]: Restricted Access
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: Email address
+        - textbox "Email address" [ref=e16]:
+          - /placeholder: you@yourplatform.com
+      - generic [ref=e17]:
+        - generic [ref=e18]: Password
+        - textbox "Password" [ref=e19]:
+          - /placeholder: Enter your password
+      - button "Sign in" [ref=e20]
+    - paragraph [ref=e21]: Platform admin access only. Tenant admins use a different dashboard.
+  - alert [ref=e22]

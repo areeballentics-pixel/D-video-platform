@@ -27,6 +27,7 @@ export default function PlayerPage() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
+  const [speed, setSpeed] = useState(1);
 
   // Start playback on mount
   useEffect(() => {
@@ -143,6 +144,25 @@ export default function PlayerPage() {
       video.pause();
     }
   }, []);
+
+  
+  function handleRewind() {
+    const video = videoRef.current;
+    if (video) video.currentTime = Math.max(0, video.currentTime - 10);
+  }
+
+  function handleForward() {
+    const video = videoRef.current;
+    if (video) video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+  }
+
+  function handleSpeedChange() {
+    const video = videoRef.current;
+    if (!video) return;
+    const newSpeed = speed === 1 ? 1.25 : speed === 1.25 ? 1.5 : speed === 1.5 ? 2 : 1;
+    video.playbackRate = newSpeed;
+    setSpeed(newSpeed);
+  }
 
   function handleFullscreen() {
     const video = videoRef.current;

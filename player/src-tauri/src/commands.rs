@@ -286,6 +286,19 @@ pub async fn logout(
 
 // ─── Library Commands ───
 
+fn collect_svf_files_recursive(dir: &std::path::Path, results: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_svf_files_recursive(&path, results);
+            } else if path.extension().and_then(|e| e.to_str()).map(|ext| ext.eq_ignore_ascii_case("svf")) == Some(true) {
+                results.push(path);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn scan_library(
     folder: String,
@@ -301,32 +314,33 @@ pub async fn scan_library(
     }
 
     let mut videos = Vec::new();
+    let mut svf_paths = Vec::new();
+    collect_svf_files_recursive(&folder_path, &mut svf_paths);
 
-    let entries = std::fs::read_dir(&folder_path).map_err(|e| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("Cannot read folder: {}", e),
-        ))
-    })?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("svf") {
-            match SvfFile::open(&path) {
-                Ok(svf) => {
-                    let mut info = svf.info();
-                    info.video_id = path.to_string_lossy().to_string();
-                    videos.push(info);
-                }
-                Err(e) => {
-                    log::warn!("Skipping invalid .svf file {:?}: {}", path, e);
-                }
+    for path in svf_paths {
+        match SvfFile::open(&path) {
+            Ok(svf) => {
+                let mut info = svf.info();
+                info.file_path = Some(path.to_string_lossy().to_string());
+                videos.push(info);
+            }
+            Err(e) => {
+                log::warn!("Skipping invalid .svf file {:?}: {}", path, e);
             }
         }
     }
 
     *state.library_path.lock().await = Some(folder);
     Ok(videos)
+}
+
+/// Fetch all batches / courses the student is enrolled in with their video playlists.
+#[tauri::command]
+pub async fn get_student_batches(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, AppError> {
+    let lm = state.license_manager.lock().await;
+    lm.fetch_student_batches().await
 }
 
 // ─── Playback Commands ───
@@ -391,18 +405,19 @@ pub async fn start_playback(
         }
     }
 
-    // 2. Run an initial security check (warn but don't block)
+    // 2. Run an initial security check — LOG ONLY, never block or warn the user.
+    //    This build intentionally does NOT surface screen-recorder / remote-desktop
+    //    / VM / debugger detections to the UI (no "security-violation" event is
+    //    emitted), so legitimate tools like AnyDesk/TeamViewer never pause playback.
     let initial_status = crate::security::check_security();
     if !initial_status.is_safe {
-        log::warn!("Security issues detected at playback start: {:?}", initial_status.violations);
-        // Emit the violations to frontend (it'll show a warning banner)
-        use tauri::Emitter;
-        let _ = app_handle.emit("security-violation", &initial_status);
+        log::warn!("Security issues detected at playback start (not surfaced to user): {:?}", initial_status.violations);
     }
 
-    // 3. Start background security monitor
-    let monitor = SecurityMonitor::start(app_handle.clone());
-    *state.security_monitor.lock().await = Some(monitor);
+    // 3. Background security monitor DISABLED for this build — the periodic scan
+    //    used to emit "security-violation" every 30s, showing a red banner and
+    //    pausing the video. Left off so playback is never interrupted.
+    //    (RevalidationMonitor below is separate and still enforces tenant revocation.)
 
     // 4. Start watermark rotation
     let user_email = {

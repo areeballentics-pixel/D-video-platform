@@ -85,12 +85,17 @@ pub fn enable_capture_protection(window: &tauri::WebviewWindow) -> Result<(), St
     let hwnd = HWND(hwnd.0);
 
     unsafe {
-        // WDA_EXCLUDEFROMCAPTURE = 0x11 — makes window black in all capture tools
-        SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(0x00000011))
+        // WDA_MONITOR = 0x01 — content shows on physical monitors (incl. extended/
+        // external displays) but is captured as BLACK by software recorders
+        // (OBS, Snipping Tool, Discord, Zoom, etc.). We use this instead of
+        // WDA_EXCLUDEFROMCAPTURE (0x11) because 0x11 renders black on many
+        // extended/secondary display paths, hiding the video from legitimate users
+        // on a second monitor. Trade-off: 0x01 does NOT block hardware HDMI capture.
+        SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(0x00000001))
             .map_err(|e| format!("SetWindowDisplayAffinity failed: {}", e))?;
     }
 
-    log::info!("Screen capture protection enabled (WDA_EXCLUDEFROMCAPTURE)");
+    log::info!("Screen capture protection enabled (WDA_MONITOR — external displays allowed)");
     Ok(())
 }
 

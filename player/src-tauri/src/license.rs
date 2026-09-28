@@ -470,6 +470,34 @@ impl LicenseManager {
         Ok(validate_resp.valid)
     }
 
+    /// Fetch all batches / courses the student is enrolled in with their video playlists.
+    pub async fn fetch_student_batches(&self) -> Result<serde_json::Value, AppError> {
+        let token = self
+            .access_token
+            .as_ref()
+            .ok_or_else(|| AppError::License("Not authenticated. Please log in first.".to_string()))?;
+
+        let url = format!("{}/api/student/batches", self.server_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AppError::License(
+                "Session expired. Please log in again.".to_string(),
+            ));
+        }
+
+        Self::handle_error_status(&response)?;
+
+        let batches_resp: serde_json::Value = response.json().await?;
+        Ok(batches_resp)
+    }
+
     // ─── State Queries ───
 
     /// Returns true if the manager has an active access token.

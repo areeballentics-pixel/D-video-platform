@@ -3872,7 +3872,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "secure-video-player"
-version = "0.1.0"
+version = "0.2.6"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "svp-encryptor"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "directories",
  "env_logger",
