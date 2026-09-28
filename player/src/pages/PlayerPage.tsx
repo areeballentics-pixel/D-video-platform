@@ -280,6 +280,19 @@ export default function PlayerPage() {
             )}
           </button>
 
+          
+          <button onClick={handleRewind} className="text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors">
+            -10s
+          </button>
+          
+          <button onClick={handleForward} className="text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors">
+            +10s
+          </button>
+
+          <button onClick={handleSpeedChange} className="text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors w-10">
+            {speed}x
+          </button>
+
           {/* Time */}
           <span className="text-xs font-mono text-[var(--color-text-muted)] min-w-[80px]">
             {formatTime(currentTime)} / {formatTime(duration)}
