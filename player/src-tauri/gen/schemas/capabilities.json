@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability set for SecurePlayer","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","fs:default","fs:allow-read-file","fs:allow-exists","shell:default"]}}
+{"default":{"identifier":"default","description":"Default capability set for SecurePlayer","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","fs:default","fs:allow-read-file","fs:allow-exists","shell:default","updater:default","process:default"]}}

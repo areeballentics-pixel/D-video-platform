@@ -1,3 +1,4 @@
+import UpdateBanner from "@/components/UpdateBanner";
 import { useEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { tauri } from "@/lib/tauri";
@@ -71,6 +72,7 @@ export default function App() {
   // Main shell
   return (
     <div className="flex h-full">
+      <UpdateBanner />
       <Sidebar />
       <main className="flex-1 overflow-y-auto bg-slate-950 p-8">
         <Routes>

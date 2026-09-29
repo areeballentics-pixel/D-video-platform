@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/main/nickel.rs/schema.json",
   "productName": "SVP Encryptor",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "identifier": "com.svp.encryptor",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,6 +36,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzOTUyOEY4QTQ3QzMzRUYKUldUdk0zeWsrQ2lWWXl5L3FZYk0xdDB5UFRTbzRVSmM4d0EvSmVkNnNXTDZqZ2ZKc2xJQ2h5UFkK",
+      "endpoints": [
+        "https://github.com/areeballentics-pixel/D-video-platform/releases/latest/download/encryptor-latest.json"
+      ]
+    }
   }
 }

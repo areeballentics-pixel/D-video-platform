@@ -2,7 +2,9 @@
   "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/main/nickel.rs/schema.json",
   "identifier": "default",
   "description": "Default capability set for SVP Encryptor",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -15,10 +17,18 @@
     {
       "identifier": "http:default",
       "allow": [
-        { "url": "https://api.allentics.com/*" },
-        { "url": "http://localhost:8000/*" },
-        { "url": "http://127.0.0.1:8000/*" }
+        {
+          "url": "https://api.allentics.com/*"
+        },
+        {
+          "url": "http://localhost:8000/*"
+        },
+        {
+          "url": "http://127.0.0.1:8000/*"
+        }
       ]
-    }
+    },
+    "updater:default",
+    "process:default"
   ]
 }

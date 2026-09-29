@@ -1,6 +1,6 @@
 [package]
 name = "secure-video-player"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 description = "Secure encrypted video player for EdTech"
 
@@ -20,6 +20,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

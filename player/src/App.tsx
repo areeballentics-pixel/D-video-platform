@@ -1,3 +1,4 @@
+import UpdateBanner from "./components/UpdateBanner";
 import { useEffect } from "react";
 import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
@@ -45,6 +46,7 @@ function App() {
 
   return (
     <div className="h-screen w-screen bg-[var(--color-bg)] text-[var(--color-text)]">
+      <UpdateBanner />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/library" element={<ProtectedRoute><LibraryPage /></ProtectedRoute>} />

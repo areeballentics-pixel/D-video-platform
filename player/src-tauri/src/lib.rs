@@ -41,6 +41,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // ─── `stream` custom protocol: serves decrypted video ranges over IPC,
         //     with NO TCP socket / port. Fixes QA SP-006/007/010/013 (the old
         //     localhost http://127.0.0.1:<port>/video.mp4?token= URL is gone).

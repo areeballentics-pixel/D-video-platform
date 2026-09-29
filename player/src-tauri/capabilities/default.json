@@ -2,7 +2,9 @@
   "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/main/nickel.rs/schema.json",
   "identifier": "default",
   "description": "Default capability set for SecurePlayer",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -10,6 +12,8 @@
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-exists",
-    "shell:default"
+    "shell:default",
+    "updater:default",
+    "process:default"
   ]
 }
