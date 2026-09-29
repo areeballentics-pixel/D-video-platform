@@ -209,7 +209,7 @@ export default function PlayerPage() {
   return (
     <div className="flex h-screen flex-col bg-black">
       {/* Top Bar */}
-      <div className="flex items-center gap-4 bg-[var(--color-surface)]/80 px-4 py-2 backdrop-blur">
+      <div className="flex items-center gap-4 bg-[var(--color-surface)]/80 px-4 py-2 backdrop-blur flex-shrink-0">
         <button
           onClick={handleBack}
           className="text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
@@ -227,12 +227,12 @@ export default function PlayerPage() {
       </div>
 
       {/* Video Area */}
-      <div className="relative flex flex-1 items-center justify-center">
+      <div className="relative flex flex-1 min-h-0 overflow-hidden items-center justify-center">
         {playbackInfo && (
           <video
             ref={videoRef}
             src={playbackInfo.url}
-            className="max-h-full max-w-full"
+            className="h-full w-full object-contain"
             autoPlay
             onClick={handlePlayPause}
             onError={() =>
@@ -251,7 +251,7 @@ export default function PlayerPage() {
       </div>
 
       {/* Controls */}
-      <div className="bg-[var(--color-surface)]/80 px-6 py-3 backdrop-blur">
+      <div className="bg-[var(--color-surface)]/80 px-6 py-3 backdrop-blur flex-shrink-0 z-10">
         {/* Seek bar */}
         <input
           type="range"
