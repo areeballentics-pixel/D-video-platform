@@ -50,6 +50,10 @@ pub struct JobInfo {
     /// True when the user has clicked "Cancel" — the runner checks this
     /// between chunks and aborts cleanly.
     pub cancel_requested: bool,
+    /// Set when this job belongs to a folder batch. None for single-file jobs.
+    pub batch_id: Option<String>,
+    /// Human-readable batch name (= the folder name). None for single-file jobs.
+    pub batch_name: Option<String>,
 }
 
 
@@ -78,6 +82,8 @@ impl JobInfo {
             needs_download_urls_for: Vec::new(),
             download_urls: BTreeMap::new(),
             cancel_requested: false,
+            batch_id: None,
+            batch_name: None,
         }
     }
 }

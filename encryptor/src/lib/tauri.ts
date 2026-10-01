@@ -43,6 +43,10 @@ export const tauri = {
       },
     }),
   cancelJob: (jobId: string) => invoke<void>("cancel_job", { jobId }),
+  startFolderBatch: (folderPath: string, batchName?: string) =>
+    invoke<{ batch_id: string; batch_name: string; queued: number; skipped: number; jobs: JobInfo[] }>("start_folder_batch", {
+      input: { folder_path: folderPath, batch_name: batchName ?? null },
+    }),
   submitDownloadUrls: (jobId: string, urls: Record<string, string>) =>
     invoke<JobInfo>("submit_download_urls", { input: { job_id: jobId, urls } }),
 

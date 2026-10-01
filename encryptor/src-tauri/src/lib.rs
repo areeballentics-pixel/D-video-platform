@@ -40,6 +40,7 @@ pub fn run() {
             commands::get_app_version,
             commands::get_device_info,
             commands::get_api_auth,
+            commands::start_folder_batch,
         ])
         .setup(|_app| {
             env_logger::init();

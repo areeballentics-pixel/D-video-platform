@@ -53,4 +53,8 @@ export interface JobInfo {
   needs_download_urls_for: string[];
   download_urls: Record<string, string>;
   cancel_requested: boolean;
+  /** Set for folder-batch jobs; null for single-file jobs. */
+  batch_id: string | null;
+  /** Human-readable batch name (= folder name). Null for single-file jobs. */
+  batch_name: string | null;
 }

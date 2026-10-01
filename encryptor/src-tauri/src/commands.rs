@@ -648,3 +648,275 @@ pub async fn get_api_auth(state: State<'_, AppState>) -> Result<ApiAuth, AppErro
         access_token: token,
     })
 }
+
+
+// --- Folder Batch Encryption -------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+pub struct StartFolderBatchInput {
+    pub folder_path: String,
+    /// If empty or None, the folder's own name is used as the batch name.
+    pub batch_name: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct FolderBatchResult {
+    pub batch_id: String,
+    pub batch_name: String,
+    pub queued: usize,
+    pub skipped: usize,
+    pub jobs: Vec<JobInfo>,
+}
+
+#[tauri::command]
+pub async fn start_folder_batch(
+    input: StartFolderBatchInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<FolderBatchResult, AppError> {
+    // -- 1. Same preflight checks as start_encryption_job ---------------------
+    if state.master_key.lock().await.is_none() {
+        return Err(AppError::Auth(
+            "Master key not loaded - register the encryptor first".into(),
+        ));
+    }
+    let cfg = state.config.lock().await.clone();
+    let tenant_id_str = cfg
+        .tenant_id
+        .clone()
+        .ok_or_else(|| AppError::Auth("no tenant context - log in first".into()))?;
+    let tenant_id = Uuid::parse_str(&tenant_id_str)
+        .map_err(|_| AppError::Validation("tenant_id is not a UUID".into()))?;
+    if cfg.master_key_tenant_id.as_deref() != Some(tenant_id_str.as_str()) {
+        return Err(AppError::Auth(
+            "The loaded master key isn't confirmed for the tenant you're logged \
+             into. Re-register the encryptor for this tenant (Register Encryptor) \
+             before encrypting."
+                .into(),
+        ));
+    }
+
+    // -- 2. Resolve batch name -------------------------------------------------
+    let folder = std::path::Path::new(&input.folder_path);
+    let batch_name = input
+        .batch_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            folder
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Batch")
+                .to_string()
+        });
+
+    // -- 3. Scan folder for video files ----------------------------------------
+    const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "avi", "wmv", "webm", "m4v"];
+    let read_dir = std::fs::read_dir(folder)
+        .map_err(|e| AppError::Validation(format!("Cannot read folder: {}", e)))?;
+
+    let mut video_paths: Vec<std::path::PathBuf> = read_dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| VIDEO_EXTS.contains(&e.to_lowercase().as_str()))
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    // Sort alphabetically so jobs are queued in a predictable order.
+    video_paths.sort();
+
+    if video_paths.is_empty() {
+        return Err(AppError::Validation(
+            "No video files found in the selected folder.".into(),
+        ));
+    }
+
+    // -- 4. Snapshot master key once (same pattern as start_encryption_job) ---
+    let master_key = state
+        .master_key
+        .lock()
+        .await
+        .expect("checked above");
+
+    // -- 5. Resolve output directory -------------------------------------------
+    let output_dir = PathBuf::from(
+        cfg.output_dir.clone().unwrap_or_else(default_output_dir),
+    );
+    std::fs::create_dir_all(&output_dir)?;
+
+    // -- 6. Shared batch id for all jobs in this folder ------------------------
+    let batch_id = Uuid::new_v4().to_string();
+
+    let mut queued_jobs: Vec<JobInfo> = Vec::new();
+    let mut skipped: usize = 0;
+
+    for video_path in video_paths {
+        let path_str = video_path.to_string_lossy().to_string();
+
+        // Validate file - skip (don't abort entire batch) if corrupt/wrong type.
+        if let Err(e) = mp4_probe::validate_video_file(&path_str) {
+            log::warn!("Folder batch: skipping {:?}: {}", video_path, e);
+            skipped += 1;
+            continue;
+        }
+
+        // Probe for auto-quality label.
+        let meta = mp4_probe::probe(&path_str)
+            .unwrap_or_else(|_| mp4_probe::VideoMeta::unknown());
+        let quality_label = meta.quality_label.clone();
+
+        // Title = filename without extension.
+        let title = video_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("video")
+            .to_string();
+
+        let video_id = Uuid::new_v4();
+        let output_path = output_dir.join(format!("{}_{}.svf", video_id, quality_label));
+
+        // Build the JobInfo with batch tags.
+        let mut job = JobInfo::new_queued(
+            title.clone(),
+            path_str.clone(),
+            quality_label.clone(),
+            video_id,
+        );
+        job.batch_id = Some(batch_id.clone());
+        job.batch_name = Some(batch_name.clone());
+        job.output_path = Some(output_path.to_string_lossy().to_string());
+
+        let job = state.jobs.add(job);
+        jobs::emit_update(&app, &job);
+
+        // Spawn encryption task - identical pattern to start_encryption_job.
+        let runner_job = job.clone();
+        let job_id = job.id.clone();
+        let app_handle = app.clone();
+        let api = state.api.clone();
+        let jobs_reg = state.jobs.clone();
+        let semaphore = state.job_semaphore.clone();
+
+        tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.ok();
+
+            let started = chrono_now();
+            let updated = jobs_reg.update(&job_id, |j| {
+                if j.cancel_requested {
+                    j.status = status::CANCELLED.to_string();
+                    j.finished_at = Some(started.clone());
+                } else {
+                    j.status = status::RUNNING.to_string();
+                    j.started_at = Some(started);
+                }
+            });
+            if let Some(j) = updated {
+                jobs::emit_update(&app_handle, &j);
+                if j.status == status::CANCELLED {
+                    return;
+                }
+            }
+
+            let inputs = EncryptJobInputs {
+                input_path: PathBuf::from(&runner_job.input_path),
+                output_path: output_path.clone(),
+                video_id,
+                tenant_id,
+                master_key,
+                title: runner_job.title.clone(),
+                quality_label: quality_label.clone(),
+                meta: meta.clone(),
+            };
+
+            let app_for_progress = app_handle.clone();
+            let jobs_for_progress = jobs_reg.clone();
+            let job_id_for_progress = job_id.clone();
+
+            let encrypt_result = tokio::task::spawn_blocking(move || {
+                pipeline::encrypt_to_svf(inputs, |bytes_processed, bytes_total| {
+                    if let Some(j) =
+                        jobs_for_progress.update(&job_id_for_progress, |j| {
+                            j.bytes_processed = bytes_processed;
+                            j.bytes_total = bytes_total;
+                        })
+                    {
+                        jobs::emit_update(&app_for_progress, &j);
+                    }
+                })
+            })
+            .await;
+
+            let res = match encrypt_result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    fail_job(&jobs_reg, &app_handle, &job_id, e.to_string());
+                    return;
+                }
+                Err(e) => {
+                    fail_job(&jobs_reg, &app_handle, &job_id, format!("task join: {}", e));
+                    return;
+                }
+            };
+
+            let mut params_map: BTreeMap<String, QualityEncryptionParams> = BTreeMap::new();
+            params_map.insert(
+                quality_label.clone(),
+                QualityEncryptionParams {
+                    salt: res.encryption_salt_hex.clone(),
+                    nonce: res.encryption_nonce_hex.clone(),
+                },
+            );
+            let mut hashes: BTreeMap<String, String> = BTreeMap::new();
+            hashes.insert(quality_label.clone(), res.content_hash_hex.clone());
+            let mut sizes: BTreeMap<String, u64> = BTreeMap::new();
+            sizes.insert(quality_label.clone(), res.svf_file_size);
+
+            let request = RegisterEncryptedVideoRequest {
+                video_id: video_id.to_string(),
+                title: runner_job.title.clone(),
+                duration_ms: res.duration_ms,
+                qualities: vec![quality_label.clone()],
+                encryption_params: params_map,
+                content_hashes: hashes,
+                file_sizes: sizes,
+            };
+
+            match api.register_encrypted_video(&request).await {
+                Ok(server_resp) => {
+                    if let Some(j) = jobs_reg.update(&job_id, |j| {
+                        j.status = status::LIVE.to_string();
+                        j.finished_at = Some(chrono_now());
+                        j.svf_file_size = Some(res.svf_file_size);
+                        j.content_hash_hex = Some(res.content_hash_hex.clone());
+                        j.needs_download_urls_for =
+                            server_resp.needs_download_urls_for.clone();
+                    }) {
+                        jobs::emit_update(&app_handle, &j);
+                    }
+                }
+                Err(e) => {
+                    fail_job(
+                        &jobs_reg,
+                        &app_handle,
+                        &job_id,
+                        format!("register-encrypted: {}", e),
+                    );
+                }
+            }
+        });
+
+        queued_jobs.push(job);
+    }
+
+    Ok(FolderBatchResult {
+        batch_id,
+        batch_name,
+        queued: queued_jobs.len(),
+        skipped,
+        jobs: queued_jobs,
+    })
+}
