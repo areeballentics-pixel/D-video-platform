@@ -19,3 +19,7 @@ strip = true
 lto = "thin"
 codegen-units = 16
 panic = "abort"
+
+# Optimize crypto/dependencies in dev profile for instant local encryption
+[profile.dev.package."*"]
+opt-level = 3
