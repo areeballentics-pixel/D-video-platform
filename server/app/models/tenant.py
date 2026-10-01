@@ -33,7 +33,7 @@ class Tenant(Base):
         Integer, default=1, nullable=False
     )
     max_students: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
-    max_videos: Mapped[int] = mapped_column(Integer, default=500, nullable=False)
+    max_videos: Mapped[int] = mapped_column(Integer, default=2000, nullable=False)
     max_courses: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
 
     # ── v1.5: tier + price for at-a-glance MRR scanning ──
