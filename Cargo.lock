@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "svp-encryptor"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "directories",
  "env_logger",
